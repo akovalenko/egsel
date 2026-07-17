@@ -1,0 +1,22 @@
+# /etc/systemd/system/egsel-candidates.target
+#
+# Grouping/ordering point for egsel's candidate units. Enroll each
+# candidate with
+#
+#   systemctl add-wants egsel-candidates.target wg-quick@wgse.service
+#
+# add-wants drops a symlink under
+# /etc/systemd/system/egsel-candidates.target.wants/; to unenroll,
+# rm that symlink and daemon-reload (there is no remove-wants).
+#
+# Target units automatically complement their Wants= with After=, so
+# this target settles only once every enrolled candidate has started;
+# egsel.service is After= (and Wants=) it and needs no candidate names.
+#
+# Deliberately our own target rather than the stock wg-quick.target:
+# every wg-quick@ instance on the host is PartOf=wg-quick.target, so a
+# stop/restart of that one cascades to ALL tunnels, candidates or not —
+# too big an operational hammer to hang egsel's wiring on. Nothing is
+# PartOf this target: stopping it does nothing to the tunnels.
+[Unit]
+Description=egsel candidate channels

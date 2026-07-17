@@ -1,13 +1,9 @@
 # /etc/systemd/system/egsel.service
 #
-# WireGuard candidates group under the stock wg-quick.target: upstream
-# wg-quick@.service is already PartOf= it, and enrolling an instance
-#
-#   systemctl add-wants wg-quick.target wg-quick@wgse.service
-#
-# makes the target Want it — and target units automatically order
-# After= everything they pull in, so egsel starts once every enrolled
-# tunnel has settled. No per-instance drop-ins, no hardwired names.
+# Candidates group under egsel-candidates.target (see that file for
+# enrollment); Wants= pulls the target in, the target pulls and orders
+# after its enrolled candidates, so the daemon starts once they have
+# settled — without their names appearing here.
 #
 # The daemon adopts whatever the slot already holds and never acts
 # without probe verdicts, so ordering is a nicety for an unbiased
@@ -15,8 +11,8 @@
 # surviving dead candidates is the daemon's whole job.
 [Unit]
 Description=egsel egress failover selector
-After=network-online.target wg-quick.target
-Wants=network-online.target wg-quick.target
+After=network-online.target egsel-candidates.target
+Wants=network-online.target egsel-candidates.target
 
 [Service]
 Type=exec

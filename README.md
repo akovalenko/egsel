@@ -144,23 +144,27 @@ hardened unit gets by with `User=` plus
 go build -o egsel . && install -m 755 egsel /usr/local/bin/
 ```
 
-The systemd unit is in [dist/](dist/). For WireGuard candidates the
-stock `wg-quick.target` already does the grouping: upstream
-`wg-quick@.service` carries `PartOf=wg-quick.target`, and enrolling an
-instance
+systemd units are in [dist/](dist/): `egsel.service` and
+`egsel-candidates.target`, the grouping point the daemon orders after.
+Enroll each candidate with
 
 ```
-systemctl add-wants wg-quick.target wg-quick@wgse.service
+systemctl add-wants egsel-candidates.target wg-quick@wgse.service
 ```
 
-makes the target want it — and target units automatically order
-`After=` everything they pull in, so `egsel.service` (shipped with
-`After=wg-quick.target`) starts once every enrolled tunnel has settled.
-No per-instance drop-ins, no tunnel names hardwired into the daemon's
-unit. Ordering is only a nicety for an unbiased first seed —
-adopt-or-seed converges from any order — so non-WireGuard candidates
-can be covered with whatever their stack offers (e.g.
-`sys-subsystem-net-devices-*.device`), or not at all.
+(to unenroll, remove the symlink it created under
+`/etc/systemd/system/egsel-candidates.target.wants/` — there is no
+`remove-wants`). Target units automatically order `After=` everything
+they pull in, so the daemon starts once every enrolled candidate has
+settled — no per-instance drop-ins, no names hardwired into the
+daemon's unit. A dedicated target is used instead of the stock
+`wg-quick.target` on purpose: every `wg-quick@` instance is
+`PartOf=wg-quick.target`, making that target a stop/restart hammer for
+*all* tunnels on the host, candidates or not. Ordering is only a nicety
+for an unbiased first seed — adopt-or-seed converges from any order —
+so non-WireGuard candidates can be enrolled with whatever unit their
+stack offers (e.g. `sys-subsystem-net-devices-*.device`), or not at
+all.
 
 Keep all candidate tunnels up permanently — warm standby makes failover
 instant, and each tunnel should carry its own routing table (wg-quick
