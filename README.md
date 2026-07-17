@@ -144,13 +144,27 @@ hardened unit gets by with `User=` plus
 go build -o egsel . && install -m 755 egsel /usr/local/bin/
 ```
 
-systemd units in [dist/](dist/): `egsel.service` plus a
-`wireguard-tunnels.target` pattern to group candidate tunnels without
-hardwiring their names into the daemon's unit (systemd dependencies take
-no wildcards). Keep all candidate tunnels up permanently — warm standby
-makes failover instant, and each tunnel should carry its own routing
-table (wg-quick `Table = <own>`) so they do not fight over the switched
-one.
+The systemd unit is in [dist/](dist/). For WireGuard candidates the
+stock `wg-quick.target` already does the grouping: upstream
+`wg-quick@.service` carries `PartOf=wg-quick.target`, and enrolling an
+instance
+
+```
+systemctl add-wants wg-quick.target wg-quick@wgse.service
+```
+
+makes the target want it — and target units automatically order
+`After=` everything they pull in, so `egsel.service` (shipped with
+`After=wg-quick.target`) starts once every enrolled tunnel has settled.
+No per-instance drop-ins, no tunnel names hardwired into the daemon's
+unit. Ordering is only a nicety for an unbiased first seed —
+adopt-or-seed converges from any order — so non-WireGuard candidates
+can be covered with whatever their stack offers (e.g.
+`sys-subsystem-net-devices-*.device`), or not at all.
+
+Keep all candidate tunnels up permanently — warm standby makes failover
+instant, and each tunnel should carry its own routing table (wg-quick
+`Table = <own>`) so they do not fight over the switched one.
 
 ## License
 
