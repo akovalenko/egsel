@@ -18,7 +18,6 @@ type SelectorStatus struct {
 	LastDecision string            `json:"last_decision"`
 	SeedDeadline time.Time         `json:"seed_deadline,omitzero"`
 	SlotError    string            `json:"slot_error,omitempty"`
-	SlotNote     string            `json:"slot_note,omitempty"`
 	Candidates   []CandidateStatus `json:"candidates"`
 }
 
@@ -60,7 +59,6 @@ func (e *Engine) Snapshot() SelectorStatus {
 		CurrentSince: e.currentSince,
 		LastDecision: e.lastDecision,
 		SlotError:    e.lastSlotErr,
-		SlotNote:     e.slotNote,
 	}
 	if e.slotEmpty && now.Before(e.seedDeadline) {
 		st.SeedDeadline = e.seedDeadline

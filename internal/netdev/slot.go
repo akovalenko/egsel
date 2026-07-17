@@ -56,68 +56,40 @@ type routeEntry struct {
 // Read reports the device owning our default route (the one at our
 // Metric), "" when absent (a missing FIB table counts as empty: the
 // kernel drops empty tables). Foreign defaults at other metrics are
-// none of our business — except a lower-metric one, which shadows
-// whatever we install; that comes back as a note for the log and
-// status, or the daemon would silently degrade to a no-op. A default
+// none of our business — an admin tool trusts the admin. A default
 // unattributable to a device (pure via, multipath) is reported as an
 // opaque marker string — the engine treats any non-roster owner as
 // hands-off, which is exactly right.
-func (s *Slot) Read(ctx context.Context) (owner, note string, err error) {
+func (s *Slot) Read(ctx context.Context) (string, error) {
 	out, err := s.ip(ctx, "-json", "route", "show", "table", s.Table, "default")
 	if err != nil {
 		if strings.Contains(err.Error(), "table does not exist") {
-			return "", "", nil
+			return "", nil
 		}
-		return "", "", err
+		return "", err
 	}
 	var routes []routeEntry
 	if len(strings.TrimSpace(string(out))) > 0 {
 		if err := json.Unmarshal(out, &routes); err != nil {
-			return "", "", fmt.Errorf("parse ip -json output: %w", err)
+			return "", fmt.Errorf("parse ip -json output: %w", err)
 		}
 	}
-	var ours, shadow *routeEntry
-	for i := range routes {
-		r := &routes[i]
-		if r.Dst != "default" {
+	for _, r := range routes {
+		if r.Dst != "default" || r.Metric != s.Metric {
 			continue
 		}
 		switch {
-		case r.Metric == s.Metric:
-			if ours == nil {
-				ours = r
-			}
-		case r.Metric < s.Metric && (shadow == nil || r.Metric < shadow.Metric):
-			shadow = r
+		case len(r.Nexthops) > 0:
+			return "(multipath)", nil
+		case r.Dev != "":
+			return r.Dev, nil
+		case r.Gateway != "":
+			return "via " + r.Gateway, nil
+		default:
+			return "(unattributed)", nil
 		}
 	}
-	if shadow != nil {
-		note = fmt.Sprintf("shadowed by foreign default %s metric %d", routeDesc(shadow), shadow.Metric)
-	}
-	if ours == nil {
-		return "", note, nil
-	}
-	switch {
-	case len(ours.Nexthops) > 0:
-		return "(multipath)", note, nil
-	case ours.Dev != "":
-		return ours.Dev, note, nil
-	case ours.Gateway != "":
-		return "via " + ours.Gateway, note, nil
-	default:
-		return "(unattributed)", note, nil
-	}
-}
-
-func routeDesc(r *routeEntry) string {
-	switch {
-	case r.Dev != "":
-		return "dev " + r.Dev
-	case r.Gateway != "":
-		return "via " + r.Gateway
-	default:
-		return "(unattributed)"
-	}
+	return "", nil
 }
 
 func (s *Slot) Activate(ctx context.Context, name string) error {
