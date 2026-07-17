@@ -83,6 +83,17 @@ func TestLoadConfigRejects(t *testing.T) {
 	}
 }
 
+func TestLoadConfigTableDefaultsToMain(t *testing.T) {
+	body := strings.Replace(goodConfig, "table = \"freedom\"\n", "", 1)
+	cfg, err := loadConfig(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Selectors["freedom"].Table; got != "main" {
+		t.Fatalf("table default: %q", got)
+	}
+}
+
 func TestLoadConfigDuplicateCandidate(t *testing.T) {
 	body := strings.Replace(goodConfig, `name = "wgse2"`, `name = "wgse"`, 1)
 	if _, err := loadConfig(writeConfig(t, body)); err == nil ||

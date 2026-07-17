@@ -10,12 +10,13 @@ import (
 // fakeSlot is a kernel-table stand-in: a single mutable owner.
 type fakeSlot struct {
 	owner    string
+	note     string
 	activate int
 }
 
-func (f *fakeSlot) Read(context.Context) (string, error) { return f.owner, nil }
-func (f *fakeSlot) Clear(context.Context) error          { f.owner = ""; return nil }
-func (f *fakeSlot) Describe() string                     { return "fake slot" }
+func (f *fakeSlot) Read(context.Context) (string, string, error) { return f.owner, f.note, nil }
+func (f *fakeSlot) Clear(context.Context) error                  { f.owner = ""; return nil }
+func (f *fakeSlot) Describe() string                             { return "fake slot" }
 func (f *fakeSlot) Activate(_ context.Context, n string) error {
 	f.owner = n
 	f.activate++

@@ -13,7 +13,9 @@ import (
 // the current owner (the engine never trusts its own memory over it).
 type Slot interface {
 	// Read reports the slot's current owner, "" when the slot is empty.
-	Read(ctx context.Context) (string, error)
+	// The note is a transport-side observation worth surfacing (e.g.
+	// "shadowed by a lower-metric foreign default"), "" when all is well.
+	Read(ctx context.Context) (owner, note string, err error)
 	Activate(ctx context.Context, name string) error
 	Clear(ctx context.Context) error
 	// Describe names the slot for logs and status output.
@@ -61,6 +63,7 @@ type Engine struct {
 	currentSince time.Time
 	lastDecision string
 	lastSlotErr  string
+	slotNote     string
 
 	slotEmpty    bool
 	seedDeadline time.Time
@@ -138,7 +141,7 @@ func (e *Engine) Reconcile(ctx context.Context) {
 	defer e.mu.Unlock()
 	now := e.now()
 
-	owner, err := e.slot.Read(ctx)
+	owner, note, err := e.slot.Read(ctx)
 	if err != nil {
 		if err.Error() != e.lastSlotErr {
 			e.log.Error("slot read failed; no decisions until it recovers", "err", err)
@@ -147,6 +150,14 @@ func (e *Engine) Reconcile(ctx context.Context) {
 		return
 	}
 	e.lastSlotErr = ""
+	if note != e.slotNote {
+		if note != "" {
+			e.log.Warn("slot", "note", note)
+		} else {
+			e.log.Info("slot note cleared", "was", e.slotNote)
+		}
+		e.slotNote = note
+	}
 	e.noteOwner(owner, now)
 
 	in := Input{

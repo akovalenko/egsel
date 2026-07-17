@@ -84,7 +84,7 @@ func cmdRun(args []string) error {
 	engines := map[string]*core.Engine{}
 	for _, name := range cfg.selectorNames() {
 		sc := cfg.Selectors[name]
-		slot := &netdev.Slot{Table: sc.Table, Via: map[string]string{}}
+		slot := &netdev.Slot{Table: sc.Table, Metric: sc.RouteMetric, Via: map[string]string{}}
 		for _, c := range sc.Candidates {
 			if c.Via != "" {
 				slot.Via[c.Name] = c.Via

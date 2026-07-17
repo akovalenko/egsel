@@ -19,67 +19,88 @@ func fakeIP(t *testing.T, wantArgs string, out string, err error) func(context.C
 
 func TestReadOwner(t *testing.T) {
 	s := &Slot{Table: "freedom"}
-	s.run = fakeIP(t, "-json route show table freedom",
+	s.run = fakeIP(t, "-json route show table freedom default",
 		`[{"dst":"default","dev":"wgse2","flags":[],"scope":"link"}]`, nil)
-	dev, err := s.Read(context.Background())
-	if err != nil || dev != "wgse2" {
-		t.Fatalf("got %q, %v", dev, err)
+	dev, note, err := s.Read(context.Background())
+	if err != nil || dev != "wgse2" || note != "" {
+		t.Fatalf("got %q, %q, %v", dev, note, err)
 	}
 }
 
 func TestReadEmptyAndMissingTable(t *testing.T) {
 	s := &Slot{Table: "freedom"}
-	s.run = fakeIP(t, "-json route show table freedom", "[]", nil)
-	if dev, err := s.Read(context.Background()); err != nil || dev != "" {
+	s.run = fakeIP(t, "-json route show table freedom default", "[]", nil)
+	if dev, _, err := s.Read(context.Background()); err != nil || dev != "" {
 		t.Fatalf("empty table: got %q, %v", dev, err)
 	}
-	s.run = fakeIP(t, "-json route show table freedom", "",
-		errors.New(`ip -json route show table freedom: Error: ipv4: FIB table does not exist.`))
-	if dev, err := s.Read(context.Background()); err != nil || dev != "" {
+	s.run = fakeIP(t, "-json route show table freedom default", "",
+		errors.New(`ip -json route show table freedom default: Error: ipv4: FIB table does not exist.`))
+	if dev, _, err := s.Read(context.Background()); err != nil || dev != "" {
 		t.Fatalf("missing table must read as empty: got %q, %v", dev, err)
 	}
 }
 
-func TestReadIgnoresNonDefault(t *testing.T) {
-	s := &Slot{Table: "main"}
-	s.run = fakeIP(t, "-json route show table main",
-		`[{"dst":"10.8.0.0/24","dev":"wg0"},{"dst":"default","gateway":"192.168.1.1","dev":"enp6s0"}]`, nil)
-	if dev, _ := s.Read(context.Background()); dev != "enp6s0" {
-		t.Fatalf("got %q", dev)
+func TestReadMetricIdentityAndShadow(t *testing.T) {
+	s := &Slot{Table: "main", Metric: 100}
+	s.run = fakeIP(t, "-json route show table main default",
+		`[{"dst":"default","gateway":"10.0.0.1","dev":"ppp0","metric":50},
+		  {"dst":"default","dev":"wgse","metric":100},
+		  {"dst":"default","dev":"enp6s0","metric":600}]`, nil)
+	dev, note, err := s.Read(context.Background())
+	if err != nil || dev != "wgse" {
+		t.Fatalf("must pick our metric: got %q, %v", dev, err)
+	}
+	if note != "shadowed by foreign default dev ppp0 metric 50" {
+		t.Fatalf("lower-metric foreign default must surface: %q", note)
+	}
+	// no default at our metric, only foreign ones → empty slot + note
+	s.run = fakeIP(t, "-json route show table main default",
+		`[{"dst":"default","dev":"ppp0","metric":50}]`, nil)
+	dev, note, _ = s.Read(context.Background())
+	if dev != "" || note == "" {
+		t.Fatalf("foreign-only defaults: got %q, %q", dev, note)
+	}
+	// higher-metric foreign default is normal coexistence — no note
+	s.run = fakeIP(t, "-json route show table main default",
+		`[{"dst":"default","dev":"wgse","metric":100},
+		  {"dst":"default","dev":"enp6s0","metric":600}]`, nil)
+	dev, note, _ = s.Read(context.Background())
+	if dev != "wgse" || note != "" {
+		t.Fatalf("higher-metric neighbors are fine: got %q, %q", dev, note)
 	}
 }
 
 func TestReadOpaqueForms(t *testing.T) {
 	s := &Slot{Table: "t"}
-	s.run = fakeIP(t, "-json route show table t",
+	s.run = fakeIP(t, "-json route show table t default",
 		`[{"dst":"default","gateway":"10.0.0.1"}]`, nil)
-	if dev, _ := s.Read(context.Background()); dev != "via 10.0.0.1" {
+	if dev, _, _ := s.Read(context.Background()); dev != "via 10.0.0.1" {
 		t.Fatalf("pure-via default: got %q", dev)
 	}
-	s.run = fakeIP(t, "-json route show table t",
+	s.run = fakeIP(t, "-json route show table t default",
 		`[{"dst":"default","nexthops":[{"dev":"a"},{"dev":"b"}]}]`, nil)
-	if dev, _ := s.Read(context.Background()); dev != "(multipath)" {
+	if dev, _, _ := s.Read(context.Background()); dev != "(multipath)" {
 		t.Fatalf("multipath default: got %q", dev)
 	}
 }
 
-func TestActivateWithAndWithoutVia(t *testing.T) {
+func TestActivateVariants(t *testing.T) {
 	s := &Slot{Table: "freedom"}
 	s.run = fakeIP(t, "route replace default dev wgse table freedom", "", nil)
 	if err := s.Activate(context.Background(), "wgse"); err != nil {
 		t.Fatal(err)
 	}
-	s.Via = map[string]string{"enp6s0": "192.168.1.1"}
-	s.run = fakeIP(t, "route replace default via 192.168.1.1 dev enp6s0 table freedom", "", nil)
+	s = &Slot{Table: "main", Metric: 100, Via: map[string]string{"enp6s0": "192.168.1.1"}}
+	s.run = fakeIP(t, "route replace default via 192.168.1.1 dev enp6s0 table main metric 100", "", nil)
 	if err := s.Activate(context.Background(), "enp6s0"); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestClearTolerant(t *testing.T) {
-	s := &Slot{Table: "freedom"}
-	s.run = fakeIP(t, "route del default table freedom", "",
-		errors.New("ip route del default table freedom: RTNETLINK answers: No such process"))
+	s := &Slot{Table: "freedom", Metric: 100}
+	s.run = fakeIP(t, "route del default table freedom metric 100", "",
+		errors.New("ip route del default table freedom metric 100: RTNETLINK answers: No such process"))
 	if err := s.Clear(context.Background()); err != nil {
 		t.Fatalf("clearing an empty slot must succeed: %v", err)
 	}

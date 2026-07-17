@@ -50,11 +50,19 @@ verdict (up/down thresholds) and the sliding loss/RTT metric.
 
 The engine is transport-blind; a transport supplies the probe and the
 slot. The `netdev` transport (the only one so far; a SOCKS front is
-planned) owns **the default route of a policy routing table**, driven
-through `ip(8)`: `ip -json route show` to read, the atomic
-`ip route replace` to switch. Candidates are plain L3 interfaces —
-WireGuard tunnels, ethernet uplinks (add `via` for a gateway route),
-anything with a name and something to ping through it.
+planned) owns **a default route of a routing table** (`table` defaults
+to `main`), driven through `ip(8)`: `ip -json route show ... default`
+to read, the atomic `ip route replace` to switch. Candidates are plain
+L3 interfaces — WireGuard tunnels, ethernet uplinks (add `via` for a
+gateway route), anything with a name and something to ping through it.
+
+Kernel routes are keyed by `(dst, metric)`, so an optional
+`route_metric` pins the identity of *our* default: egsel manipulates
+only the default at its metric while admins freely layer their own
+around it — a hand-run pppd at metric 50 wins while it lives, and when
+it dies traffic falls through to egsel's choice. A lower-metric foreign
+default shadowing ours is surfaced in `egsel status` and the log rather
+than silently turning the daemon into a no-op.
 
 ## Startup: adopt-or-seed
 

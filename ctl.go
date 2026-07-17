@@ -114,6 +114,9 @@ func renderStatus(w io.Writer, sts []core.SelectorStatus) {
 		if !st.SeedDeadline.IsZero() {
 			fmt.Fprintf(w, "  seed deadline: %s\n", st.SeedDeadline.Format(time.TimeOnly))
 		}
+		if st.SlotNote != "" {
+			fmt.Fprintf(w, "  note: %s\n", st.SlotNote)
+		}
 		if st.SlotError != "" {
 			fmt.Fprintf(w, "  SLOT ERROR: %s\n", st.SlotError)
 		}

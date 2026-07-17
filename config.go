@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -24,10 +25,7 @@ func (d *duration) UnmarshalText(b []byte) error {
 }
 
 func (d duration) or(def time.Duration) time.Duration {
-	if d == 0 {
-		return def
-	}
-	return time.Duration(d)
+	return cmp.Or(time.Duration(d), def)
 }
 
 type Config struct {
@@ -40,7 +38,11 @@ type Config struct {
 
 type SelectorConfig struct {
 	Transport string `toml:"transport"`
-	Table     string `toml:"table"`
+	Table     string `toml:"table"` // defaults to "main"
+	// RouteMetric pins our default's identity to a metric (routes are
+	// keyed by dst+metric), letting admins layer their own defaults
+	// around ours; 0 = a plain metricless default.
+	RouteMetric int `toml:"route_metric"`
 	// FailMode is a required, explicit policy choice: "open" (no
 	// reachable candidate -> clear the slot, traffic falls through to
 	// remaining routing) or "closed" (point it at the best static rank
@@ -83,6 +85,7 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("no selectors configured")
 	}
 	for name, sc := range cfg.Selectors {
+		sc.Table = cmp.Or(sc.Table, "main")
 		if err := sc.validate(); err != nil {
 			return nil, fmt.Errorf("selector %s: %w", name, err)
 		}
@@ -94,8 +97,8 @@ func (sc *SelectorConfig) validate() error {
 	if sc.Transport != "netdev" {
 		return fmt.Errorf("transport must be \"netdev\" (got %q); socks is planned", sc.Transport)
 	}
-	if sc.Table == "" {
-		return fmt.Errorf("table is required")
+	if sc.RouteMetric < 0 {
+		return fmt.Errorf("route_metric must be ≥ 0")
 	}
 	if sc.FailMode != "open" && sc.FailMode != "closed" {
 		return fmt.Errorf("fail_mode must be explicitly \"open\" or \"closed\" (got %q)", sc.FailMode)
@@ -141,35 +144,20 @@ func (sc *SelectorConfig) engineConfig(name string) core.EngineConfig {
 	for i, c := range sc.Candidates {
 		roster[i] = core.Candidate{Name: c.Name, Rank: core.Rank{Prio: c.Prio, Subprio: c.Subprio}}
 	}
-	interval := sc.ProbeInterval.or(2 * time.Second)
 	return core.EngineConfig{
 		Name:   name,
 		Roster: roster,
 		Health: core.HealthConfig{
-			UpThreshold:   orInt(sc.UpThreshold, 1),
-			DownThreshold: orInt(sc.DownThreshold, 3),
-			MetricWindow:  orInt(sc.MetricWindow, 30),
+			UpThreshold:   cmp.Or(sc.UpThreshold, 1),
+			DownThreshold: cmp.Or(sc.DownThreshold, 3),
+			MetricWindow:  cmp.Or(sc.MetricWindow, 30),
 		},
 		Window:         sc.UpgradeWindow.or(30 * time.Minute),
 		SeedBudget:     sc.SeedBudget.or(30 * time.Second),
 		FailMode:       sc.failMode(),
-		LossTol:        orFloat(sc.LossTolerance, 0.05),
-		ReconcileEvery: interval,
+		LossTol:        cmp.Or(sc.LossTolerance, 0.05),
+		ReconcileEvery: sc.ProbeInterval.or(2 * time.Second),
 	}
-}
-
-func orInt(v, def int) int {
-	if v == 0 {
-		return def
-	}
-	return v
-}
-
-func orFloat(v, def float64) float64 {
-	if v == 0 {
-		return def
-	}
-	return v
 }
 
 // selectorNames returns config keys in stable order.
