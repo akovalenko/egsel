@@ -133,7 +133,12 @@ dead channel break — and those are unsalvageable anyway.
 
 ## Running
 
-Needs root (raw ICMP sockets and route changes). Build and install:
+Privileges: route changes need CAP_NET_ADMIN; probing prefers
+unprivileged ICMP ping sockets (`net.ipv4.ping_group_range`, open to
+everyone under systemd's defaults) and falls back to raw ICMP
+(CAP_NET_RAW) where they are disabled. Plain root is simplest; a
+hardened unit gets by with `User=` plus
+`AmbientCapabilities=CAP_NET_ADMIN`. Build and install:
 
 ```
 go build -o egsel . && install -m 755 egsel /usr/local/bin/

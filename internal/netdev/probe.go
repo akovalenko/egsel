@@ -63,9 +63,9 @@ func (p *Prober) Run(ctx context.Context, out chan<- core.ProbeResult) {
 }
 
 func (p *Prober) probeOnce(id, seq int) (time.Duration, error) {
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.IPPROTO_ICMP)
+	fd, raw, err := icmpSocket()
 	if err != nil {
-		return 0, fmt.Errorf("raw socket: %w", err)
+		return 0, err
 	}
 	defer unix.Close(fd)
 	if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, p.Cand); err != nil {
@@ -98,16 +98,39 @@ func (p *Prober) probeOnce(id, seq int) (time.Duration, error) {
 		case err != nil:
 			return 0, fmt.Errorf("recv: %w", err)
 		}
-		if isOurEchoReply(buf[:n], id, seq) {
+		msg := buf[:n]
+		if raw {
+			msg = stripIPHeader(msg)
+		}
+		// A ping socket receives only its own replies (the kernel
+		// demultiplexes by the id it assigned on send), so the id check
+		// applies to raw sockets only.
+		if matchEchoReply(msg, id, seq, raw) {
 			return time.Since(start), nil
 		}
 		// unrelated ICMP on the device; keep waiting
 	}
 }
 
+// icmpSocket prefers an unprivileged ICMP "ping socket" (SOCK_DGRAM,
+// available to gids within net.ipv4.ping_group_range — open to all
+// under systemd's defaults) and falls back to a raw socket
+// (CAP_NET_RAW) where ping sockets are disabled.
+func icmpSocket() (fd int, raw bool, err error) {
+	fd, err = unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, unix.IPPROTO_ICMP)
+	if err == nil {
+		return fd, false, nil
+	}
+	fd, err = unix.Socket(unix.AF_INET, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.IPPROTO_ICMP)
+	if err != nil {
+		return -1, false, fmt.Errorf("icmp socket (ping and raw): %w", err)
+	}
+	return fd, true, nil
+}
+
 // echoID derives a stable 16-bit echo identifier from the pid and the
 // interface name, so parallel probers on one host tell replies apart
-// (the reply filter matches both id and seq anyway).
+// on raw sockets (ping sockets ignore it: the kernel assigns its own).
 func echoID(iface string) int {
 	h := fnv.New32a()
 	h.Write([]byte(iface))
@@ -127,20 +150,29 @@ func echoRequest(id, seq int) []byte {
 	return msg
 }
 
-// isOurEchoReply parses a raw IPv4 packet (raw ICMP sockets deliver the
-// IP header) and matches an echo reply against our id and seq.
-func isOurEchoReply(pkt []byte, id, seq int) bool {
+// stripIPHeader unwraps the IPv4 header raw ICMP sockets deliver; nil
+// when the packet is too short to hold one.
+func stripIPHeader(pkt []byte) []byte {
 	if len(pkt) < 20 {
+		return nil
+	}
+	if hlen := int(pkt[0]&0x0f) * 4; len(pkt) >= hlen {
+		return pkt[hlen:]
+	}
+	return nil
+}
+
+// matchEchoReply reports whether msg is an ICMP echo reply carrying our
+// seq — and our id, when checkID (raw sockets see everyone's ICMP;
+// ping sockets receive only their own, with a kernel-assigned id).
+func matchEchoReply(msg []byte, id, seq int, checkID bool) bool {
+	if len(msg) < 8 || msg[0] != 0 || msg[1] != 0 {
 		return false
 	}
-	hlen := int(pkt[0]&0x0f) * 4
-	if len(pkt) < hlen+8 {
+	if checkID && binary.BigEndian.Uint16(msg[4:]) != uint16(id) {
 		return false
 	}
-	icmp := pkt[hlen:]
-	return icmp[0] == 0 && icmp[1] == 0 && // echo reply
-		binary.BigEndian.Uint16(icmp[4:]) == uint16(id) &&
-		binary.BigEndian.Uint16(icmp[6:]) == uint16(seq)
+	return binary.BigEndian.Uint16(msg[6:]) == uint16(seq)
 }
 
 // checksum is the RFC 1071 ones-complement sum over the message with

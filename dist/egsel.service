@@ -15,6 +15,11 @@ ExecStart=/usr/local/bin/egsel run -c /etc/egsel.toml
 Restart=on-failure
 RestartSec=2
 StateDirectory=egsel
+# Hardened variant: probing needs no CAP_NET_RAW where ping sockets
+# are enabled (net.ipv4.ping_group_range), so a non-root user with
+# route rights suffices:
+#   User=egsel
+#   AmbientCapabilities=CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
