@@ -1,4 +1,4 @@
-package wgtun
+package netdev
 
 import (
 	"context"

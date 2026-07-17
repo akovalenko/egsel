@@ -1,4 +1,4 @@
-package wgtun
+package netdev
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 type Slot struct {
 	Table string
 	// Via maps a candidate to an optional gateway for its route
-	// ("default via GW dev X"); point-to-point wg devices need none,
+	// ("default via GW dev X"); point-to-point devices (wg) need none,
 	// ethernet uplinks in the table=main multi-WAN case do.
 	Via map[string]string
 

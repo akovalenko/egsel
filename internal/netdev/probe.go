@@ -1,8 +1,9 @@
-// Package wgtun is the WireGuard transport: it probes a tunnel the way
-// traffic will use it (ICMP echo to the far tunnel address with the
-// socket bound to the wg interface) and owns the default route of a
-// policy table through the ip(8) command.
-package wgtun
+// Package netdev is the network-device transport: candidates are plain
+// L3 interfaces (WireGuard tunnels, ethernet uplinks — nothing here is
+// tunnel-specific). It probes each one the way traffic will use it
+// (ICMP echo to a per-candidate address with the socket bound to the
+// device) and owns the default route of a policy table through ip(8).
+package netdev
 
 import (
 	"context"
@@ -19,20 +20,23 @@ import (
 )
 
 // Prober measures one candidate end-to-end over the pair (protocol,
-// path) that will carry traffic: an echo through the wg device checks
-// the wg crypto, the underlay beneath it and the peer in one probe. The
-// SO_BINDTODEVICE binding makes it config-independent — a broken policy
-// routing setup cannot masquerade as a dead channel.
+// path) that will carry traffic. For a WireGuard tunnel an echo to the
+// far tunnel address checks the crypto, the underlay beneath it and the
+// peer in one probe; for an ethernet uplink an echo to the gateway (or
+// beyond) plays the same role. The SO_BINDTODEVICE binding makes it
+// config-independent — a broken policy routing setup cannot masquerade
+// as a dead channel.
 type Prober struct {
-	Cand     string // candidate name (= wg interface)
+	Cand     string // candidate name (= interface name)
 	Peer     netip.Addr
 	Interval time.Duration
 	Timeout  time.Duration
 }
 
 // Run probes on the interval until ctx is done, feeding results to out.
-// The socket is opened per probe: a recreated interface (wg-quick
-// restart) changes ifindex, and a fresh SO_BINDTODEVICE picks it up.
+// The socket is opened per probe: a recreated interface (e.g. after a
+// wg-quick restart) changes ifindex, and a fresh SO_BINDTODEVICE picks
+// it up.
 func (p *Prober) Run(ctx context.Context, out chan<- core.ProbeResult) {
 	id := echoID(p.Cand)
 	tick := time.NewTicker(p.Interval)
