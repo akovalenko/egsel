@@ -1,0 +1,65 @@
+# egsel configuration example: three interchangeable WireGuard exit
+# tunnels competing for the default route of policy table "freedom".
+# For a classic multi-WAN box use table = "main", fail_mode = "closed"
+# and per-candidate "via" gateways instead.
+
+# Soak timers survive daemon restarts through this file (freshness-
+# guarded); the slot owner itself is never stored — the kernel is the
+# source of truth for it.
+state_file = "/var/lib/egsel/state.json"
+state_max_age = "10m"
+control_socket = "/run/egsel.sock"
+
+[selectors.freedom]
+transport = "netdev"
+table = "freedom"
+# Explicit policy for "nothing is reachable":
+#   "open"   — clear the slot; traffic falls through to the remaining
+#              routing (here: the censored home uplink — degraded but
+#              alive, and no blackhole).
+#   "closed" — keep the slot pointed at the best static rank even if
+#              dead: a dead route beats none when this is the only
+#              default (the table = "main" case).
+fail_mode = "open"
+probe_interval = "2s"
+probe_timeout = "1s"
+up_threshold = 1     # probes to become alive
+down_threshold = 3   # consecutive misses to become dead
+upgrade_window = "30m"
+seed_budget = "30s"  # give preferred candidates this long to warm up at boot
+metric_window = 30   # probes in the loss/RTT window
+loss_tolerance = 0.05
+
+# Higher prio = more preferred. Only a strictly higher prio ever
+# preempts a working channel (after upgrade_window of continuous
+# liveness); subprio and the measured metric break ties only when a
+# choice is forced (seed, failover).
+
+[[selectors.freedom.candidates]]
+name = "wgse"        # the interface; peer = far-end tunnel address
+peer = "172.18.0.1"
+prio = 100           # the preferred exit — the only one that preempts
+
+[[selectors.freedom.candidates]]
+name = "wgse2"
+peer = "172.20.0.1"
+prio = 50            # fallbacks share a prio: sticky among themselves
+subprio = 10         # ...with a mild lean when a choice is forced
+
+[[selectors.freedom.candidates]]
+name = "wgie"
+peer = "172.21.0.1"  # adjust to the real far-end address
+prio = 50
+
+# Multi-WAN sketch (ethernet uplinks need a gateway for the route):
+#
+# [selectors.wan]
+# transport = "netdev"
+# table = "main"
+# fail_mode = "closed"
+#
+# [[selectors.wan.candidates]]
+# name = "enp3s0"
+# peer = "203.0.113.1"    # what to ping through this uplink
+# via = "203.0.113.1"     # gateway for "default via ... dev enp3s0"
+# prio = 100

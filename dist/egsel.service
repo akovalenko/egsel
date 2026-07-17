@@ -1,0 +1,20 @@
+# /etc/systemd/system/egsel.service
+#
+# The daemon adopts whatever the slot already holds and never acts
+# without probe verdicts, so ordering is a nicety for an unbiased
+# first seed, not a correctness requirement. Wants= (not Requires=):
+# surviving dead candidates is the daemon's whole job.
+[Unit]
+Description=egsel egress failover selector
+After=network-online.target wireguard-tunnels.target
+Wants=network-online.target wireguard-tunnels.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/egsel run -c /etc/egsel.toml
+Restart=on-failure
+RestartSec=2
+StateDirectory=egsel
+
+[Install]
+WantedBy=multi-user.target
