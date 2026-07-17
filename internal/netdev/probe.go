@@ -31,14 +31,21 @@ type Prober struct {
 	Peer     netip.Addr
 	Interval time.Duration
 	Timeout  time.Duration
+
+	// The probe socket persists across probes: on the ping-socket path
+	// the kernel assigns the echo id per socket, so a per-probe socket
+	// would rotate the id every 2s and leak a fresh conntrack/NAT entry
+	// per probe on every stateful box along the path. One long-lived
+	// socket = one id = one entry, refreshed like a long-running ping.
+	fd  int
+	raw bool
 }
 
 // Run probes on the interval until ctx is done, feeding results to out.
-// The socket is opened per probe: a recreated interface (e.g. after a
-// wg-quick restart) changes ifindex, and a fresh SO_BINDTODEVICE picks
-// it up.
 func (p *Prober) Run(ctx context.Context, out chan<- core.ProbeResult) {
 	id := echoID(p.Cand)
+	p.fd = -1
+	defer p.closeSocket()
 	tick := time.NewTicker(p.Interval)
 	defer tick.Stop()
 	seq := 0
@@ -63,19 +70,28 @@ func (p *Prober) Run(ctx context.Context, out chan<- core.ProbeResult) {
 }
 
 func (p *Prober) probeOnce(id, seq int) (time.Duration, error) {
-	fd, raw, err := icmpSocket()
-	if err != nil {
-		return 0, err
+	if p.fd < 0 {
+		fd, raw, err := icmpSocket()
+		if err != nil {
+			return 0, err
+		}
+		p.fd, p.raw = fd, raw
 	}
-	defer unix.Close(fd)
-	if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, p.Cand); err != nil {
+	// Re-arm the device binding every probe: SO_BINDTODEVICE resolves
+	// the name to an ifindex at setsockopt time, so a recreated
+	// interface (e.g. after a wg-quick restart) is picked up on the
+	// next probe without giving up the socket — and with it the echo
+	// id. Failure (ENODEV while the interface is gone) keeps the
+	// socket: nothing about it went bad.
+	if err := unix.SetsockoptString(p.fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, p.Cand); err != nil {
 		return 0, fmt.Errorf("bind to %s: %w", p.Cand, err)
 	}
 
 	dst := &unix.SockaddrInet4{Addr: p.Peer.As4()}
 	start := time.Now()
 	deadline := start.Add(p.Timeout)
-	if err := unix.Sendto(fd, echoRequest(id, seq), 0, dst); err != nil {
+	if err := unix.Sendto(p.fd, echoRequest(id, seq), 0, dst); err != nil {
+		p.closeSocket()
 		return 0, fmt.Errorf("send: %w", err)
 	}
 
@@ -86,29 +102,42 @@ func (p *Prober) probeOnce(id, seq int) (time.Duration, error) {
 			return 0, fmt.Errorf("timeout (%s)", p.Timeout)
 		}
 		tv := unix.NsecToTimeval(left.Nanoseconds())
-		if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+		if err := unix.SetsockoptTimeval(p.fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+			p.closeSocket()
 			return 0, fmt.Errorf("rcvtimeo: %w", err)
 		}
-		n, _, err := unix.Recvfrom(fd, buf, 0)
+		n, _, err := unix.Recvfrom(p.fd, buf, 0)
 		switch {
 		case err == unix.EAGAIN || err == unix.EWOULDBLOCK:
 			return 0, fmt.Errorf("timeout (%s)", p.Timeout)
 		case err == unix.EINTR:
 			continue
 		case err != nil:
+			p.closeSocket()
 			return 0, fmt.Errorf("recv: %w", err)
 		}
 		msg := buf[:n]
-		if raw {
+		if p.raw {
 			msg = stripIPHeader(msg)
 		}
 		// A ping socket receives only its own replies (the kernel
 		// demultiplexes by the id it assigned on send), so the id check
-		// applies to raw sockets only.
-		if matchEchoReply(msg, id, seq, raw) {
+		// applies to raw sockets only. Late replies to earlier probes
+		// fail the seq check and are skipped.
+		if matchEchoReply(msg, id, seq, p.raw) {
 			return time.Since(start), nil
 		}
 		// unrelated ICMP on the device; keep waiting
+	}
+}
+
+// closeSocket drops the persistent socket after a hard error; the next
+// probe reopens fresh. Timeouts and bind failures do not come here —
+// the socket itself is healthy in both cases.
+func (p *Prober) closeSocket() {
+	if p.fd >= 0 {
+		unix.Close(p.fd)
+		p.fd = -1
 	}
 }
 
