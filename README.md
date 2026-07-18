@@ -60,9 +60,9 @@ Kernel routes are keyed by `(dst, metric)`, so an optional
 `route_metric` pins the identity of *our* default: egsel manipulates
 only the default at its metric while admins freely layer their own
 around it — a hand-run pppd at metric 50 wins while it lives, and when
-it dies traffic falls through to egsel's choice. A lower-metric foreign
-default shadowing ours is surfaced in `egsel status` and the log rather
-than silently turning the daemon into a no-op.
+it dies traffic falls through to egsel's choice. Defaults at other
+metrics are entirely the admin's business; egsel neither inspects nor
+reports them.
 
 ## Startup: adopt-or-seed
 

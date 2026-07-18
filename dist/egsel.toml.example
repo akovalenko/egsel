@@ -16,9 +16,9 @@ table = "freedom"    # defaults to "main" when omitted
 # route_metric = 100 — pin our default to a metric: kernel routes are
 # keyed by (dst, metric), so admins can layer their own defaults around
 # ours (a pppd at metric 50 wins while alive; when it dies, traffic
-# falls through to us). A lower-metric foreign default shadowing ours
-# is surfaced in `egsel status` and the log. 0 (default) = a plain
-# metricless default — simplest when egsel is the table's only writer.
+# falls through to us); defaults at other metrics are the admin's
+# business, egsel ignores them. 0 (default) = a plain metricless
+# default — simplest when egsel is the table's only writer.
 # Explicit policy for "nothing is reachable":
 #   "open"   — clear the slot; traffic falls through to the remaining
 #              routing (here: the censored home uplink — degraded but
