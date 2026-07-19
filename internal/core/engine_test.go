@@ -142,6 +142,77 @@ func TestEngineSeedBudgetExpiry(t *testing.T) {
 	}
 }
 
+// graceHarness is newHarness with the fresh-evidence grace armed, as
+// the daemon configures it (derived from probe timings).
+func graceHarness(slotOwner string, failMode FailMode) *engineHarness {
+	h := newHarness(slotOwner, failMode)
+	h.e.cfg.Grace = 5 * time.Second
+	return h
+}
+
+func TestEngineSharedOutageBlipNeverSwitches(t *testing.T) {
+	h := graceHarness("wgse", FailOpen)
+	h.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+	// provider outage: everyone starts losing; the current (preferred)
+	// phase-races to its Dead verdict first
+	for range 2 {
+		h.step(t, map[string]bool{"wgse": false, "wgse2": false, "wgie": false})
+	}
+	h.step(t, map[string]bool{"wgse": false}) // wgse's 3rd miss → Dead
+	if h.slot.owner != "wgse" || h.slot.activate != 0 {
+		t.Fatalf("must not hop onto a losing fallback: %+v", h.slot)
+	}
+	// the blip ends; a fallback's probe cleans up first — the current's
+	// death is storm-era news, it gets a fresh probe round
+	h.step(t, map[string]bool{"wgse2": true})
+	if h.slot.owner != "wgse" || h.slot.activate != 0 {
+		t.Fatalf("stale-dead preferred must get its fresh probe: %+v", h.slot)
+	}
+	// ...and that probe succeeds: back to normal, zero switches made
+	h.step(t, map[string]bool{"wgse": true, "wgie": true})
+	if h.slot.owner != "wgse" || h.slot.activate != 0 {
+		t.Fatalf("a blip must not move the slot at all: %+v", h.slot)
+	}
+}
+
+func TestEngineRecoverySeedWaitsOutTheLottery(t *testing.T) {
+	h := graceHarness("wgse", FailOpen)
+	h.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+	// outage long enough to prove everyone dead → fail-open clears
+	for range 3 {
+		h.step(t, map[string]bool{"wgse": false, "wgse2": false, "wgie": false})
+	}
+	if h.slot.owner != "" {
+		t.Fatalf("fail-open must clear the slot: %+v", h.slot)
+	}
+	// provider returns; the junior's probe happens to tick first — it
+	// must not win the slot by phase alone
+	h.step(t, map[string]bool{"wgse2": true})
+	if h.slot.owner != "" {
+		t.Fatalf("junior must not seed past a stale-dead senior: %+v", h.slot)
+	}
+	// the senior's probe ticks next: alive → seeded by rank, no soak
+	h.step(t, map[string]bool{"wgse": true, "wgie": true})
+	if h.slot.owner != "wgse" {
+		t.Fatalf("recovered preferred must take the empty slot: %+v", h.slot)
+	}
+}
+
+func TestEngineRecoverySeedYieldsOnFreshDeath(t *testing.T) {
+	h := graceHarness("wgse", FailOpen)
+	h.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+	for range 3 {
+		h.step(t, map[string]bool{"wgse": false, "wgse2": false, "wgie": false})
+	}
+	// only the fallbacks came back: the senior's fresh probe is lost →
+	// its death is confirmed, the junior seeds legitimately
+	h.step(t, map[string]bool{"wgse2": true})
+	h.step(t, map[string]bool{"wgse": false, "wgie": true})
+	if h.slot.owner != "wgse2" {
+		t.Fatalf("freshly-confirmed-dead senior must not block: %+v", h.slot)
+	}
+}
+
 func TestEngineOpaqueOwnerNeverTouched(t *testing.T) {
 	h := newHarness("tailscale0", FailOpen)
 	for range 5 {

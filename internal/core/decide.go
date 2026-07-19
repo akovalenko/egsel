@@ -47,8 +47,19 @@ type Input struct {
 	// the top static rank may seed (juniors wait for seniors to warm
 	// up); after it, the best reachable one wins.
 	SeedDeadline time.Time
-	FailMode     FailMode
-	LossTol      float64
+	// FreshSince anchors evidence freshness at forced choices: a junior
+	// may take the slot past a higher-prio candidate only on death
+	// evidence at least this new (see CandState.FreshlyDead). The engine
+	// re-arms it whenever a clean candidate appears after a spell with
+	// none — the signature of a shared outage ending, when storm-era
+	// verdicts must not be trusted.
+	FreshSince time.Time
+	// GraceDeadline bounds the fresh-evidence wait — roughly one probe
+	// round per senior; past it, stale verdicts are acted on anyway (a
+	// wedged prober must not pin the slot). Zero disables the wait.
+	GraceDeadline time.Time
+	FailMode      FailMode
+	LossTol       float64
 
 	Now time.Time
 }
@@ -63,7 +74,11 @@ type Decision struct {
 // in the case split: failover off a dead current is immediate and
 // ignores the window; an upgrade away from a *working* current needs a
 // strictly higher Prio held alive for the whole window; equal-prio
-// candidates never displace a working current at all.
+// candidates never displace a working current at all. Forced choices
+// (failover, seed) additionally demand fresh evidence — clean targets,
+// freshly-proven-dead seniors — so that a shared outage killing every
+// candidate at once neither hops onto a dying fallback nor hands the
+// recovered slot to whichever junior's probe ticked first.
 func Decide(in Input) Decision {
 	if in.Opaque {
 		return Decision{Hold, "", fmt.Sprintf("slot owned by non-roster %q; holding (cannot assess it)", in.Current)}
@@ -83,7 +98,7 @@ func Decide(in Input) Decision {
 }
 
 func decideSeed(in Input) Decision {
-	best, ok := bestForced(in, func(s CandState) bool { return s.Status == Alive })
+	best, ok := bestForced(in, CandState.Clean)
 	if !ok {
 		if in.FailMode == FailClosed && in.allProvenDead() {
 			c, _ := bestForced(in, func(CandState) bool { return true })
@@ -96,12 +111,18 @@ func decideSeed(in Input) Decision {
 	if best.Rank.Compare(top) == 0 {
 		return Decision{Activate, best.Name, fmt.Sprintf("seed: top-ranked %s reachable", best.Name)}
 	}
-	// Defer for a higher-ranked candidate only while one is still
-	// unproven (cold-boot warm-up race); every higher-ranked one being
-	// proven Dead leaves nothing to wait for — the slot is down, seed now.
+	// Defer for a higher-ranked candidate while one is still unproven
+	// (cold-boot warm-up race) ...
 	if in.Now.Before(in.SeedDeadline) && in.anyHigherUnproven(best.Rank) {
 		return Decision{Hold, "", fmt.Sprintf("seed: %s reachable but deferring for higher-ranked until %s",
 			best.Name, in.SeedDeadline.Format(time.TimeOnly))}
+	}
+	// ... or proven Dead only by storm-era evidence (the post-outage
+	// seed is otherwise a probe-phase lottery): within the grace, only a
+	// freshly lost probe writes a senior off.
+	if name, held := in.seniorLacksFreshVerdict(best); held {
+		return Decision{Hold, "", fmt.Sprintf("seed: %s reachable, but higher-prio %s has no fresh verdict — holding until %s",
+			best.Name, name, in.GraceDeadline.Format(time.TimeOnly))}
 	}
 	return Decision{Activate, best.Name, fmt.Sprintf("seed: best reachable is %s", best.Name)}
 }
@@ -116,6 +137,26 @@ func (in Input) anyHigherUnproven(r Rank) bool {
 		}
 	}
 	return false
+}
+
+// seniorLacksFreshVerdict names a candidate with Prio strictly above
+// target's whose death is not proven by fresh evidence (FreshlyDead)
+// while the grace deadline runs. Activating target past such a senior
+// is the post-outage lottery: seconds later the senior proves alive and
+// sits out a whole upgrade window. Alive-but-suspect and recovering
+// (Dead, recent probes succeeding) seniors block too; each resolves
+// within about one probe round — alive seniors become the target
+// themselves, dead ones refresh their proof with the next lost probe.
+func (in Input) seniorLacksFreshVerdict(target Candidate) (string, bool) {
+	if !in.Now.Before(in.GraceDeadline) {
+		return "", false
+	}
+	for _, c := range in.Roster {
+		if c.Rank.Prio > target.Rank.Prio && !in.States[c.Name].FreshlyDead(in.FreshSince) {
+			return c.Name, true
+		}
+	}
+	return "", false
 }
 
 func decideUpgrade(in Input, cur CandState) Decision {
@@ -152,13 +193,18 @@ func decideUpgrade(in Input, cur CandState) Decision {
 }
 
 func decideFailover(in Input) Decision {
-	best, ok := bestForced(in, func(s CandState) bool { return s.Status == Alive })
+	best, ok := bestForced(in, CandState.Clean)
 	if ok {
+		if name, held := in.seniorLacksFreshVerdict(best); held {
+			return Decision{Hold, "", fmt.Sprintf(
+				"current %s dead; %s reachable, but higher-prio %s has no fresh verdict — holding until %s",
+				in.Current, best.Name, name, in.GraceDeadline.Format(time.TimeOnly))}
+		}
 		return Decision{Activate, best.Name,
 			fmt.Sprintf("failover: current %s dead, best reachable is %s", in.Current, best.Name)}
 	}
 	if !in.allProvenDead() {
-		return Decision{Hold, "", fmt.Sprintf("current %s dead; waiting for verdicts on remaining candidates", in.Current)}
+		return Decision{Hold, "", fmt.Sprintf("current %s dead; waiting for clean verdicts on remaining candidates", in.Current)}
 	}
 	if in.FailMode == FailOpen {
 		return Decision{Clear, "", "no candidate reachable; failing open (clearing slot)"}

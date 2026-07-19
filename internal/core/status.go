@@ -8,17 +8,18 @@ import (
 // SelectorStatus is one selector's full picture for the control socket:
 // enough to answer "why has it not switched?" without reading code.
 type SelectorStatus struct {
-	Name         string            `json:"name"`
-	Slot         string            `json:"slot"`
-	FailMode     string            `json:"fail_mode"`
-	Window       string            `json:"upgrade_window"`
-	Current      string            `json:"current"`
-	Opaque       bool              `json:"opaque,omitempty"`
-	CurrentSince time.Time         `json:"current_since,omitzero"`
-	LastDecision string            `json:"last_decision"`
-	SeedDeadline time.Time         `json:"seed_deadline,omitzero"`
-	SlotError    string            `json:"slot_error,omitempty"`
-	Candidates   []CandidateStatus `json:"candidates"`
+	Name          string            `json:"name"`
+	Slot          string            `json:"slot"`
+	FailMode      string            `json:"fail_mode"`
+	Window        string            `json:"upgrade_window"`
+	Current       string            `json:"current"`
+	Opaque        bool              `json:"opaque,omitempty"`
+	CurrentSince  time.Time         `json:"current_since,omitzero"`
+	LastDecision  string            `json:"last_decision"`
+	SeedDeadline  time.Time         `json:"seed_deadline,omitzero"`
+	GraceDeadline time.Time         `json:"grace_deadline,omitzero"`
+	SlotError     string            `json:"slot_error,omitempty"`
+	Candidates    []CandidateStatus `json:"candidates"`
 }
 
 type CandidateStatus struct {
@@ -62,6 +63,9 @@ func (e *Engine) Snapshot() SelectorStatus {
 	}
 	if e.slotEmpty && now.Before(e.seedDeadline) {
 		st.SeedDeadline = e.seedDeadline
+	}
+	if now.Before(e.graceDeadline) {
+		st.GraceDeadline = e.graceDeadline
 	}
 
 	curRank, curAlive := Rank{}, false
@@ -118,6 +122,9 @@ func (e *Engine) verdict(c Candidate, tr *Tracker, s CandState, curRank Rank, cu
 	}
 	aliveFor := now.Sub(s.AliveSince).Round(time.Second)
 	if e.current == "" || e.opaque || !curAlive {
+		if s.FailStreak > 0 {
+			return fmt.Sprintf("alive %s, losing (%d probes) — not a failover target", aliveFor, s.FailStreak)
+		}
 		return fmt.Sprintf("alive %s", aliveFor)
 	}
 	if c.Rank.Prio <= curRank.Prio {

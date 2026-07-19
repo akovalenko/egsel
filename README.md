@@ -87,6 +87,37 @@ Soak timers survive restarts via a small state file (freshness-guarded),
 so frequent redeploys do not starve a pending upgrade. The slot owner is
 deliberately not stored — the kernel is the source of truth.
 
+## Shared outages: fresh evidence at forced choices
+
+Candidates often share fate — several tunnels ride one physical uplink,
+and a provider outage kills them all within a probe round of each
+other. Naive rules turn that into two mistakes. During the collapse,
+the first-to-die current fails over onto a "still alive" fallback whose
+verdict is merely lagging its failing probes — a pointless hop onto a
+dying channel. After the outage, whichever candidate's probe happens to
+tick first re-seeds the empty slot; a fallback winning that phase
+lottery exiles the preferred channel for a whole upgrade window,
+turning a seconds-long blip into half an hour on the wrong channel.
+
+Both mistakes come from trusting storm-era verdicts, so forced choices
+demand fresh evidence instead:
+
+- A failover or seed target must be *clean*: debounced-alive **and**
+  its latest probe succeeded. Alive on an active fail streak is
+  mid-collapse, not a refuge.
+- Passing over a higher-prio candidate takes *fresh death evidence*: a
+  probe lost at or after the moment a clean candidate (re)appeared —
+  the signature of an outage ending. A stale Dead verdict from the
+  storm gets one probe round to refute itself; a senior that proves
+  alive in that round takes the slot by rank with no soak (the move is
+  forced, so the upgrade window does not apply).
+
+The wait is bounded by a short grace (derived from the probe timings —
+about one probe round plus the up-threshold climb) so a wedged prober
+cannot pin the slot, and it never delays the common case: when a
+channel dies alone, the very probes that proved it dead are the fresh
+evidence, and failover onto a clean fallback is as instant as ever.
+
 ## When nothing is reachable
 
 An explicit, required policy choice per selector:

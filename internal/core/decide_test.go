@@ -25,6 +25,24 @@ func dead() CandState { return CandState{Status: Dead, Metric: Metric{Loss: 1, S
 
 func unknown() CandState { return CandState{Metric: Metric{Loss: 1}} }
 
+// suspect is Alive whose latest probes are being lost: the verdict is
+// stale against the stream (mid-collapse of a shared outage).
+func suspect(since time.Time) CandState {
+	s := alive(since)
+	s.FailStreak = 2
+	s.LastAt = t0
+	return s
+}
+
+// deadAt is Dead with its losing streak's last probe completed at last:
+// fresh or stale depends on the caller's FreshSince.
+func deadAt(last time.Time) CandState {
+	s := dead()
+	s.FailStreak = 3
+	s.LastAt = last
+	return s
+}
+
 func input(current string, states map[string]CandState) Input {
 	return Input{
 		Current: current,
@@ -221,6 +239,103 @@ func TestOpaqueOwnerHeld(t *testing.T) {
 	in.Opaque = true
 	if d := Decide(in); d.Op != Hold {
 		t.Fatalf("an opaque owner must never be evicted: %+v", d)
+	}
+}
+
+func TestFailoverShunsSuspectTarget(t *testing.T) {
+	// shared outage mid-collapse: current proven dead first, the
+	// fallbacks' Alive verdicts lag their failing probes → hold, don't
+	// hop onto a dying channel
+	in := input("wgse", map[string]CandState{
+		"wgse":  deadAt(t0),
+		"wgse2": suspect(t0.Add(-2 * time.Hour)),
+		"wgie":  suspect(t0.Add(-2 * time.Hour)),
+	})
+	if d := Decide(in); d.Op != Hold {
+		t.Fatalf("must not fail over onto a losing candidate: %+v", d)
+	}
+	// one fallback's probe succeeds → clean → normal instant failover
+	// (the dead current's own streak is fresh evidence, no grace hold)
+	in.States["wgse2"] = alive(t0.Add(-2 * time.Hour))
+	in.FreshSince = t0.Add(-5 * time.Second)
+	in.GraceDeadline = t0.Add(5 * time.Second)
+	if d := Decide(in); d.Op != Activate || d.Target != "wgse2" {
+		t.Fatalf("clean fallback with freshly-dead current must win: %+v", d)
+	}
+}
+
+func TestFailoverHoldsForStaleDeadSenior(t *testing.T) {
+	// blip just ended: a fallback is clean again, but the dead current's
+	// (higher-prio) last lost probe predates the freshness anchor — its
+	// death is storm-era news, give it a fresh probe round
+	in := input("wgse", map[string]CandState{
+		"wgse":  deadAt(t0.Add(-3 * time.Second)),
+		"wgse2": alive(t0.Add(-2 * time.Hour)),
+		"wgie":  deadAt(t0.Add(-3 * time.Second)),
+	})
+	in.FreshSince = t0.Add(-time.Second)
+	in.GraceDeadline = t0.Add(5 * time.Second)
+	if d := Decide(in); d.Op != Hold {
+		t.Fatalf("stale-dead senior must get a fresh probe round: %+v", d)
+	}
+	// the fresh probe is lost → death confirmed → failover proceeds
+	in.States["wgse"] = deadAt(t0)
+	if d := Decide(in); d.Op != Activate || d.Target != "wgse2" {
+		t.Fatalf("freshly-confirmed death unblocks failover: %+v", d)
+	}
+}
+
+func TestFailoverGraceExpiryActsOnStaleVerdicts(t *testing.T) {
+	// a wedged prober must not pin the slot: past the grace deadline the
+	// stale Dead is acted on anyway
+	in := input("wgse", map[string]CandState{
+		"wgse":  deadAt(t0.Add(-3 * time.Second)),
+		"wgse2": alive(t0.Add(-2 * time.Hour)),
+		"wgie":  deadAt(t0),
+	})
+	in.FreshSince = t0.Add(-time.Second)
+	in.GraceDeadline = t0.Add(-time.Millisecond)
+	if d := Decide(in); d.Op != Activate || d.Target != "wgse2" {
+		t.Fatalf("expired grace must act on stale verdicts: %+v", d)
+	}
+}
+
+func TestSeedHoldsForStaleDeadSenior(t *testing.T) {
+	// post-outage reseed: the junior's probe ticked first, but the
+	// seniors' Dead verdicts are storm-era — no probe-phase lottery
+	in := input("", map[string]CandState{
+		"wgse":  deadAt(t0.Add(-3 * time.Second)),
+		"wgse2": alive(t0.Add(-time.Second)),
+		"wgie":  deadAt(t0.Add(-3 * time.Second)),
+	})
+	in.SeedDeadline = t0.Add(-time.Minute) // long expired mid-outage
+	in.FreshSince = t0.Add(-time.Second)
+	in.GraceDeadline = t0.Add(5 * time.Second)
+	if d := Decide(in); d.Op != Hold {
+		t.Fatalf("junior must not win the recovery by probe phase: %+v", d)
+	}
+	// the senior's fresh probe is lost → it really is dead → seed junior
+	in.States["wgse"] = deadAt(t0)
+	if d := Decide(in); d.Op != Activate || d.Target != "wgse2" {
+		t.Fatalf("fresh death evidence lets the junior seed: %+v", d)
+	}
+}
+
+func TestRecoveringSeniorBlocksJunior(t *testing.T) {
+	// up_threshold > 1: the senior's recent probes succeed (okStreak
+	// climbing) while still debounced-Dead — not freshly dead, wait
+	recovering := dead()
+	recovering.FailStreak = 0 // last probe succeeded
+	recovering.LastAt = t0
+	in := input("wgse2", map[string]CandState{
+		"wgse":  recovering,
+		"wgse2": deadAt(t0),
+		"wgie":  alive(t0.Add(-2 * time.Hour)),
+	})
+	in.FreshSince = t0.Add(-5 * time.Second)
+	in.GraceDeadline = t0.Add(5 * time.Second)
+	if d := Decide(in); d.Op != Hold {
+		t.Fatalf("recovering senior must finish its climb first: %+v", d)
 	}
 }
 

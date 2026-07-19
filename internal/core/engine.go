@@ -40,6 +40,11 @@ type EngineConfig struct {
 	// ReconcileEvery paces the periodic reconcile; probe transitions
 	// additionally trigger one immediately (instant failover).
 	ReconcileEvery time.Duration
+	// Grace bounds the fresh-evidence wait at forced choices (see
+	// Input.FreshSince): long enough for every candidate to complete one
+	// probe round, plus the up-threshold climb of a recovering senior.
+	// Zero disables the wait.
+	Grace time.Duration
 }
 
 // Engine runs one selector: it folds probe results into per-candidate
@@ -67,6 +72,12 @@ type Engine struct {
 	pendingOwner string // target of our last successful Activate, until Read confirms
 	loggedOpaque string
 	readOnce     bool
+
+	// Fresh-evidence anchor for forced choices (see Input.FreshSince):
+	// re-armed when a clean candidate appears after a spell with none.
+	anyClean      bool
+	freshSince    time.Time
+	graceDeadline time.Time
 }
 
 func NewEngine(cfg EngineConfig, slot Slot, store *Store, log *slog.Logger, now func() time.Time) *Engine {
@@ -109,7 +120,11 @@ func (e *Engine) Run(ctx context.Context, results <-chan ProbeResult) {
 	}
 }
 
-// observe folds one probe result in; reports whether a verdict changed.
+// observe folds one probe result in; reports whether it warrants an
+// immediate reconcile: a verdict change, or evidence short of one that
+// forced choices act on — a cleanliness flip (re-anchors freshness,
+// changes target eligibility) or, while a grace hold may be pending, a
+// lost probe on a Dead candidate (the fresh death proof it waits for).
 func (e *Engine) observe(r ProbeResult) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -117,12 +132,16 @@ func (e *Engine) observe(r ProbeResult) bool {
 	if t == nil {
 		return false
 	}
-	before := t.State().Status
+	before := t.State()
 	if !t.Observe(r) {
-		return false
+		after := t.State()
+		if before.Clean() != after.Clean() {
+			return true
+		}
+		return after.Status == Dead && !r.OK && e.now().Before(e.graceDeadline)
 	}
 	st := t.State()
-	e.log.Info("verdict", "candidate", r.Cand, "was", before.String(), "now", st.Status.String(), "err", r.Err)
+	e.log.Info("verdict", "candidate", r.Cand, "was", before.Status.String(), "now", st.Status.String(), "err", r.Err)
 	switch st.Status {
 	case Alive:
 		e.store.SetHealthy(e.cfg.Name, r.Cand, st.AliveSince)
@@ -149,16 +168,20 @@ func (e *Engine) Reconcile(ctx context.Context) {
 	e.lastSlotErr = ""
 	e.noteOwner(owner, now)
 
+	states := e.states()
+	e.armFreshness(states, now)
 	in := Input{
-		Current:      e.current,
-		Opaque:       e.opaque,
-		Roster:       e.cfg.Roster,
-		States:       e.states(),
-		Window:       e.cfg.Window,
-		SeedDeadline: e.seedDeadline,
-		FailMode:     e.cfg.FailMode,
-		LossTol:      e.cfg.LossTol,
-		Now:          now,
+		Current:       e.current,
+		Opaque:        e.opaque,
+		Roster:        e.cfg.Roster,
+		States:        states,
+		Window:        e.cfg.Window,
+		SeedDeadline:  e.seedDeadline,
+		FreshSince:    e.freshSince,
+		GraceDeadline: e.graceDeadline,
+		FailMode:      e.cfg.FailMode,
+		LossTol:       e.cfg.LossTol,
+		Now:           now,
 	}
 	d := Decide(in)
 	e.lastDecision = d.Reason
@@ -184,6 +207,26 @@ func (e *Engine) Reconcile(ctx context.Context) {
 		e.pendingOwner = ""
 		e.noteOwner("", now)
 	}
+}
+
+// armFreshness re-anchors evidence freshness when a clean candidate
+// appears after a spell with none — the signature of a shared outage
+// ending (or a storm collapse resolving). Storm-era verdicts predate
+// the anchor and cannot justify passing over a senior; the grace gives
+// every senior one fresh probe round to disprove its stale Dead.
+func (e *Engine) armFreshness(states map[string]CandState, now time.Time) {
+	clean := false
+	for _, s := range states {
+		if s.Clean() {
+			clean = true
+			break
+		}
+	}
+	if clean && !e.anyClean {
+		e.freshSince = now
+		e.graceDeadline = now.Add(e.cfg.Grace)
+	}
+	e.anyClean = clean
 }
 
 // noteOwner tracks the observed slot owner: classifies it against the

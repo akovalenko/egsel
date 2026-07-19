@@ -98,4 +98,28 @@ type CandState struct {
 	Status     Status
 	AliveSince time.Time // entry into debounced-Alive; may predate the daemon (state file)
 	Metric     Metric
+
+	// FailStreak and LastAt carry the freshest raw evidence beneath the
+	// debounced verdict: consecutive lost probes ending at the last
+	// result's completion time. Forced choices consult them because a
+	// verdict can be stale against the probe stream — an Alive candidate
+	// on an active fail streak is mid-collapse, a Dead one from a shared
+	// outage may be fine again (see Clean and FreshlyDead).
+	FailStreak int
+	LastAt     time.Time
+}
+
+// Clean reports a candidate fit to receive the slot at a forced choice:
+// debounced-Alive and its latest probe succeeded. Alive on an active
+// fail streak is suspect — likely mid-transition to Dead during a
+// shared outage — and switching onto it buys nothing.
+func (s CandState) Clean() bool { return s.Status == Alive && s.FailStreak == 0 }
+
+// FreshlyDead reports death proven by evidence at least as new as
+// since: debounced-Dead with the latest probe — completed at or after
+// since — lost. A bare Dead verdict can be storm-era news (the shared
+// outage that produced it may be over), and a Dead candidate whose
+// recent probes succeed is recovering, not freshly dead.
+func (s CandState) FreshlyDead(since time.Time) bool {
+	return s.Status == Dead && s.FailStreak > 0 && !s.LastAt.Before(since)
 }

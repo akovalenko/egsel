@@ -144,11 +144,13 @@ func (sc *SelectorConfig) engineConfig(name string) core.EngineConfig {
 	for i, c := range sc.Candidates {
 		roster[i] = core.Candidate{Name: c.Name, Rank: core.Rank{Prio: c.Prio, Subprio: c.Subprio}}
 	}
+	up := cmp.Or(sc.UpThreshold, 1)
+	interval := sc.ProbeInterval.or(2 * time.Second)
 	return core.EngineConfig{
 		Name:   name,
 		Roster: roster,
 		Health: core.HealthConfig{
-			UpThreshold:   cmp.Or(sc.UpThreshold, 1),
+			UpThreshold:   up,
 			DownThreshold: cmp.Or(sc.DownThreshold, 3),
 			MetricWindow:  cmp.Or(sc.MetricWindow, 30),
 		},
@@ -156,7 +158,11 @@ func (sc *SelectorConfig) engineConfig(name string) core.EngineConfig {
 		SeedBudget:     sc.SeedBudget.or(30 * time.Second),
 		FailMode:       sc.failMode(),
 		LossTol:        cmp.Or(sc.LossTolerance, 0.05),
-		ReconcileEvery: sc.ProbeInterval.or(2 * time.Second),
+		ReconcileEvery: interval,
+		// Derived, not configured: one probe round for a senior to
+		// refute a stale verdict (interval + timeout), the up-threshold
+		// climb of a recovering one, plus an interval of slack.
+		Grace: time.Duration(up)*interval + sc.ProbeTimeout.or(time.Second) + interval,
 	}
 }
 

@@ -83,7 +83,8 @@ func (t *Tracker) Observe(r ProbeResult) bool {
 }
 
 func (t *Tracker) State() CandState {
-	return CandState{Status: t.status, AliveSince: t.aliveSince, Metric: t.metric()}
+	return CandState{Status: t.status, AliveSince: t.aliveSince, Metric: t.metric(),
+		FailStreak: t.failStreak, LastAt: t.lastAt}
 }
 
 func (t *Tracker) metric() Metric {
