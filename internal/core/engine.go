@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -67,6 +68,11 @@ type Engine struct {
 	lastDecision string
 	lastSlotErr  string
 
+	// forceAt is the moment of the last admin force ("egsel force"): a
+	// fresh trust episode for the current (see Input.ForceAt). Survives
+	// restarts via the state file, like the soak timers.
+	forceAt time.Time
+
 	slotEmpty    bool
 	seedDeadline time.Time
 	pendingOwner string // target of our last successful Activate, until Read confirms
@@ -96,7 +102,53 @@ func NewEngine(cfg EngineConfig, slot Slot, store *Store, log *slog.Logger, now 
 		}
 		e.trackers[c.Name] = NewTracker(cfg.Health, prior)
 	}
+	if at := store.PriorForceAt(cfg.Name); !at.IsZero() {
+		e.forceAt = at
+		e.log.Info("restored admin force mark from state file", "at", at)
+	}
 	return e
+}
+
+// HasCandidate reports whether name is in this selector's roster. The
+// roster is immutable after construction, so no lock is taken.
+func (e *Engine) HasCandidate(name string) bool { return e.inRoster(name) }
+
+// Force switches the slot to cand on the admin's word, unconditionally:
+// no rank, soak, or freshness demands — dead or unknown targets
+// included; the explicit command is the evidence ("no switching without
+// data" defers to an explicit order). There is no pin: the command
+// switches now, and the automatic policy speaks again from the next
+// reconcile off the new state — a dead target is failed over off, a
+// working one holds the slot while challengers re-soak from this
+// moment (see Input.ForceAt). The force mark is persisted at once, not
+// on the periodic tick, so a restart does not erase the episode
+// boundary.
+func (e *Engine) Force(ctx context.Context, cand string) error {
+	e.mu.Lock()
+	if !e.inRoster(cand) {
+		e.mu.Unlock()
+		return fmt.Errorf("no candidate %q in selector %s", cand, e.cfg.Name)
+	}
+	now := e.now()
+	if err := e.slot.Activate(ctx, cand); err != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("activate %s: %w", cand, err)
+	}
+	e.forceAt = now
+	e.store.SetForceAt(e.cfg.Name, now)
+	e.lastDecision = "forced by admin; automatic policy resumes on the next pass"
+	e.pendingOwner = cand
+	e.noteOwner(cand, now)
+	e.mu.Unlock()
+	e.log.Info("admin force: slot switched", "to", cand)
+	e.saveState()
+	return nil
+}
+
+func (e *Engine) saveState() {
+	if err := e.store.Save(e.now()); err != nil {
+		e.log.Warn("state save failed", "err", err)
+	}
 }
 
 // Run consumes probe results and reconciles until ctx is done. All
@@ -173,6 +225,7 @@ func (e *Engine) Reconcile(ctx context.Context) {
 	in := Input{
 		Current:       e.current,
 		Opaque:        e.opaque,
+		ForceAt:       e.forceAt,
 		Roster:        e.cfg.Roster,
 		States:        states,
 		Window:        e.cfg.Window,

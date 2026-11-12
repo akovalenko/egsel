@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -30,6 +31,10 @@ type engineHarness struct {
 }
 
 func newHarness(slotOwner string, failMode FailMode) *engineHarness {
+	return newHarnessWithStore(slotOwner, failMode, nil)
+}
+
+func newHarnessWithStore(slotOwner string, failMode FailMode, store *Store) *engineHarness {
 	h := &engineHarness{slot: &fakeSlot{owner: slotOwner}, now: t0, ctx: context.Background()}
 	cfg := EngineConfig{
 		Name:   "freedom",
@@ -38,7 +43,7 @@ func newHarness(slotOwner string, failMode FailMode) *engineHarness {
 		Window: 30 * time.Minute, SeedBudget: 30 * time.Second,
 		FailMode: failMode, LossTol: 0.05, ReconcileEvery: 2 * time.Second,
 	}
-	h.e = NewEngine(cfg, h.slot, nil, slog.Default(), func() time.Time { return h.now })
+	h.e = NewEngine(cfg, h.slot, store, slog.Default(), func() time.Time { return h.now })
 	return h
 }
 
@@ -243,5 +248,101 @@ func TestEngineExternalChangeAdopted(t *testing.T) {
 	}
 	if h.slot.activate != 0 {
 		t.Fatalf("adopting must not activate (timers are cold): %+v", h.slot)
+	}
+}
+
+func TestEngineForceSwitchesNowAndPolicyResumes(t *testing.T) {
+	h := newHarness("wgse", FailOpen)
+	// steady state: everyone healthy, the preferred soaked on the slot
+	for range 2 {
+		h.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+	}
+	h.now = h.now.Add(time.Hour)
+	h.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+
+	// the kick: switch right now, no rank/soak/freshness questions asked
+	if err := h.e.Force(h.ctx, "wgse2"); err != nil {
+		t.Fatal(err)
+	}
+	if h.slot.owner != "wgse2" {
+		t.Fatalf("force must switch at once: %+v", h.slot)
+	}
+	st := h.e.Snapshot()
+	if st.Current != "wgse2" || st.ForcedAt.IsZero() {
+		t.Fatalf("snapshot after force: %+v", st)
+	}
+
+	// automatic policy resumes off the new state: the soaked senior does
+	// not reclaim at once (fresh trust episode)...
+	h.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+	if h.slot.owner != "wgse2" {
+		t.Fatalf("forced current must not be reclaimed instantly: %+v", h.slot)
+	}
+	// ...but a full window past the kick it does
+	h.now = h.now.Add(31 * time.Minute)
+	h.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+	if h.slot.owner != "wgse" {
+		t.Fatalf("re-soaked senior must reclaim the slot: %+v", h.slot)
+	}
+}
+
+func TestEngineForceOntoDeadTriesAndFailsOver(t *testing.T) {
+	h := newHarness("wgse", FailOpen)
+	// wgse2 long dead, the current healthy
+	for range 3 {
+		h.step(t, map[string]bool{"wgse": true, "wgse2": false, "wgie": false})
+	}
+	// force onto the dead candidate anyway — the command is the evidence
+	if err := h.e.Force(h.ctx, "wgse2"); err != nil {
+		t.Fatal(err)
+	}
+	if h.slot.owner != "wgse2" {
+		t.Fatalf("force must place even a dead target: %+v", h.slot)
+	}
+	// the next pass speaks: failover off the dead forced current
+	h.step(t, map[string]bool{"wgse": true, "wgse2": false, "wgie": false})
+	if h.slot.owner != "wgse" {
+		t.Fatalf("automatic policy must fail over off the dead target: %+v", h.slot)
+	}
+}
+
+func TestEngineForceUnknownCandidateRejected(t *testing.T) {
+	h := newHarness("wgse", FailOpen)
+	h.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+	if err := h.e.Force(h.ctx, "nope"); err == nil {
+		t.Fatal("unknown candidate must be rejected")
+	}
+	if h.slot.owner != "wgse" {
+		t.Fatalf("rejected force must not touch the slot: %+v", h.slot)
+	}
+}
+
+func TestEngineForceMarkSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	store := OpenStore(path, time.Minute, t0, slog.Default())
+	h1 := newHarnessWithStore("wgse2", FailOpen, store)
+	// healthy episode: wgse soaked (healthy-since persisted), current wgse2
+	for range 2 {
+		h1.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+	}
+	h1.now = h1.now.Add(time.Hour)
+	h1.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+	if err := h1.e.Force(h1.ctx, "wgse2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// a restart reloads the file (fresh store, adopted slot) and must
+	// keep the episode boundary: without it, the restored healthy-since
+	// makes the soaked senior preempt on the very first pass
+	restartAt := t0.Add(time.Hour).Add(10 * time.Second)
+	h2 := newHarnessWithStore("wgse2", FailOpen, OpenStore(path, time.Minute, restartAt, slog.Default()))
+	h2.now = restartAt
+	h2.step(t, map[string]bool{"wgse": true, "wgse2": true, "wgie": true})
+	if h2.slot.owner != "wgse2" {
+		t.Fatalf("restart must keep the force episode: %+v", h2.slot)
+	}
+	if h2.e.Snapshot().ForcedAt.IsZero() {
+		t.Fatal("force mark must be restored into the snapshot")
 	}
 }

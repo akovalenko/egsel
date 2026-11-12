@@ -348,3 +348,26 @@ func TestCurrentUnknownHolds(t *testing.T) {
 		t.Fatalf("restart must not touch the slot before verdicts: %+v", d)
 	}
 }
+
+func TestForceRestartsChallengerSoak(t *testing.T) {
+	// a soaked senior normally reclaims the slot from a working junior
+	in := input("wgse2", map[string]CandState{
+		"wgse":  alive(t0.Add(-2 * time.Hour)),
+		"wgse2": alive(t0.Add(-2 * time.Hour)),
+		"wgie":  alive(t0.Add(-2 * time.Hour)),
+	})
+	if d := Decide(in); d.Op != Activate || d.Target != "wgse" {
+		t.Fatalf("soaked senior must preempt: %+v", d)
+	}
+	// but the admin just forced the slot here: a fresh trust episode —
+	// the challenger's soak counts from the kick, not its own clock
+	in.ForceAt = t0.Add(-time.Minute)
+	if d := Decide(in); d.Op != Hold {
+		t.Fatalf("a forced current must not be reclaimed at once: %+v", d)
+	}
+	// a full window past the force, the senior preempts again
+	in.ForceAt = t0.Add(-31 * time.Minute)
+	if d := Decide(in); d.Op != Activate || d.Target != "wgse" {
+		t.Fatalf("the re-soak matured — senior preempts: %+v", d)
+	}
+}

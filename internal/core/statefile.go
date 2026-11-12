@@ -27,6 +27,10 @@ type fileData struct {
 	SavedAt time.Time `json:"saved_at"`
 	// selector -> candidate -> continuously-healthy-since
 	Selectors map[string]map[string]time.Time `json:"selectors"`
+	// selector -> moment of the last admin force ("egsel force"): the
+	// trust-episode boundary, surviving restarts under the same
+	// freshness guard as the timers
+	ForcedAt map[string]time.Time `json:"forced_at,omitempty"`
 }
 
 // OpenStore loads path if it exists and is fresh enough; a stale file
@@ -51,6 +55,7 @@ func OpenStore(path string, maxAge time.Duration, now time.Time, log *slog.Logge
 			if d.Selectors != nil {
 				s.data.Selectors = d.Selectors
 			}
+			s.data.ForcedAt = d.ForcedAt
 			log.Info("state file loaded", "path", path, "age", age.Round(time.Second))
 		}
 	}
@@ -88,6 +93,28 @@ func (s *Store) ClearHealthy(selector, cand string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.data.Selectors[selector], cand)
+}
+
+// PriorForceAt returns the restored admin-force moment, zero if none.
+func (s *Store) PriorForceAt(selector string) time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.ForcedAt[selector]
+}
+
+func (s *Store) SetForceAt(selector string, at time.Time) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.ForcedAt == nil {
+		s.data.ForcedAt = map[string]time.Time{}
+	}
+	s.data.ForcedAt[selector] = at
 }
 
 // Save writes the file atomically (tmp + rename). It always rewrites,

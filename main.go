@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,6 +32,8 @@ func main() {
 		err = cmdRun(os.Args[2:])
 	case "status":
 		err = cmdStatus(os.Args[2:])
+	case "force":
+		err = cmdForce(os.Args[2:])
 	case "check":
 		err = cmdCheck(os.Args[2:])
 	default:
@@ -49,6 +52,10 @@ func usage() {
   egsel status [-c config] [-s sock] [-json]
                                      ask a running daemon why it is
                                      where it is
+  egsel force  [-c config] [-s sock] [<selector>] <candidate>
+                                     switch the slot to a candidate
+                                     right now; automatic policy
+                                     resumes on the next pass
   egsel check  [-c config]           validate the configuration
 `)
 }
@@ -168,6 +175,42 @@ func cmdStatus(args []string) error {
 		return enc.Encode(sts)
 	}
 	renderStatus(os.Stdout, sts)
+	return nil
+}
+
+func cmdForce(args []string) error {
+	fs := flag.NewFlagSet("force", flag.ExitOnError)
+	cpath := fs.String("c", defaultConfig, "config file (to find the socket)")
+	sock := fs.String("s", "", "control socket (overrides config)")
+	fs.Parse(args)
+
+	rest := fs.Args()
+	if len(rest) < 1 || len(rest) > 2 {
+		return fmt.Errorf("usage: egsel force [<selector>] <candidate>")
+	}
+	req := "force " + strings.Join(rest, " ")
+
+	path := *sock
+	if path == "" {
+		path = "/run/egsel.sock"
+		if cfg, err := loadConfig(*cpath); err == nil {
+			path = cfg.ControlSocket
+		}
+	}
+	rep, err := queryCtl(path, req)
+	if err != nil {
+		return err
+	}
+	if !rep.OK {
+		return fmt.Errorf("%s", rep.Error)
+	}
+	for _, st := range rep.Statuses {
+		cur := st.Current
+		if cur == "" {
+			cur = "(none)"
+		}
+		fmt.Printf("%s: forced, current %s\n", st.Name, cur)
+	}
 	return nil
 }
 

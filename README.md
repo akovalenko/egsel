@@ -118,6 +118,22 @@ cannot pin the slot, and it never delays the common case: when a
 channel dies alone, the very probes that proved it dead are the fresh
 evidence, and failover onto a clean fallback is as instant as ever.
 
+## Manual override: `egsel force`
+
+The daemon owns the slot, but the admin outranks it — for a moment.
+`egsel force <candidate>` switches at once, unconditionally: no rank,
+soak, or freshness demands, dead or unknown targets included — the
+explicit command is the evidence. There is no pin: from the next pass
+(at most one probe interval) the automatic policy speaks again off the
+new state. A dead target is failed over off; a working one holds the
+slot like any current — except that the force opens a fresh *trust
+episode*: challengers count their upgrade soak from the kick, not from
+their own older alive-since, so an already-soaked senior cannot reclaim
+the slot two seconds later and every kick buys a full window. The
+episode boundary survives restarts via the state file. With several
+selectors configured, name one: `egsel force <selector> <candidate>`;
+a bare candidate must be unique across rosters.
+
 ## When nothing is reachable
 
 An explicit, required policy choice per selector:

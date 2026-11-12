@@ -3,7 +3,8 @@
 # For a classic multi-WAN box use table = "main", fail_mode = "closed"
 # and per-candidate "via" gateways instead.
 
-# Soak timers survive daemon restarts through this file (freshness-
+# Soak timers and admin-force marks ("egsel force" trust-episode
+# boundaries) survive daemon restarts through this file (freshness-
 # guarded); the slot owner itself is never stored — the kernel is the
 # source of truth for it.
 state_file = "/var/lib/egsel/state.json"

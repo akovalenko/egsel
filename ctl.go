@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,9 +17,15 @@ import (
 	"github.com/akovalenko/egsel/internal/core"
 )
 
-// serveCtl answers status queries on a unix socket: each connection
-// receives the full status JSON and is closed. Explainability is a
-// first-class duty of the daemon — this is its mouth.
+// serveCtl answers on a unix socket, one request per connection:
+//
+//	status                          the full status dump (also the answer
+//	                                to silence — older clients just read)
+//	force [<selector>] <candidate>  switch the slot to a candidate at
+//	                                once; automatic policy resumes on the
+//	                                next pass
+//
+// Explainability is a first-class duty of the daemon — this is its mouth.
 func serveCtl(ctx context.Context, path string, engines map[string]*core.Engine, log *slog.Logger) error {
 	_ = os.Remove(path) // a stale socket from a dead daemon
 	l, err := net.Listen("unix", path)
@@ -42,21 +50,110 @@ func serveCtl(ctx context.Context, path string, engines map[string]*core.Engine,
 			log.Warn("control accept", "err", err)
 			continue
 		}
-		enc := json.NewEncoder(conn)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(statuses(engines)); err != nil {
-			log.Warn("control write", "err", err)
-		}
+		answerCtl(ctx, conn, engines, log)
 		conn.Close()
 	}
 }
 
-func statuses(engines map[string]*core.Engine) []core.SelectorStatus {
+// ctlReply is the answer to a force request: the verdict plus the
+// post-action status of the affected selector.
+type ctlReply struct {
+	OK       bool                  `json:"ok"`
+	Error    string                `json:"error,omitempty"`
+	Statuses []core.SelectorStatus `json:"statuses,omitempty"`
+}
+
+func answerCtl(ctx context.Context, conn net.Conn, engines map[string]*core.Engine, log *slog.Logger) {
+	req := readRequest(conn)
+	parts := strings.Fields(req)
+	var rep ctlReply
+	switch {
+	case req == "" || req == "status":
+		writeJSON(conn, statuses(engines), log) // bare array, as ever
+		return
+	case parts[0] == "force" && len(parts) == 2:
+		rep = ctlForce(ctx, engines, "", parts[1])
+	case parts[0] == "force" && len(parts) == 3:
+		rep = ctlForce(ctx, engines, parts[1], parts[2])
+	default:
+		rep = ctlReply{Error: fmt.Sprintf("unknown request %q", req)}
+	}
+	writeJSON(conn, rep, log)
+}
+
+// readRequest reads one command line. A client that says nothing within
+// a short grace (older status clients, bare probes) gets the status
+// dump instead; a line without its newline still counts.
+func readRequest(conn net.Conn) string {
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil && line == "" {
+		return ""
+	}
+	return strings.TrimSpace(line)
+}
+
+func writeJSON(w io.Writer, v any, log *slog.Logger) {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		log.Warn("control write", "err", err)
+	}
+}
+
+// ctlForce forces one selector to cand. An empty selector means
+// "resolve cand across selectors": a bare candidate must live in
+// exactly one roster.
+func ctlForce(ctx context.Context, engines map[string]*core.Engine, selector, cand string) ctlReply {
+	eng, err := pickEngine(engines, selector, cand)
+	if err != nil {
+		return ctlReply{Error: err.Error()}
+	}
+	if err := eng.Force(ctx, cand); err != nil {
+		return ctlReply{Error: err.Error()}
+	}
+	return ctlReply{OK: true, Statuses: []core.SelectorStatus{eng.Snapshot()}}
+}
+
+// pickEngine resolves a force target: by selector name, or by a
+// candidate unique across rosters.
+func pickEngine(engines map[string]*core.Engine, selector, cand string) (*core.Engine, error) {
+	if selector != "" {
+		eng := engines[selector]
+		if eng == nil {
+			return nil, fmt.Errorf("no such selector %q (have: %s)", selector, strings.Join(selectorNames(engines), ", "))
+		}
+		if !eng.HasCandidate(cand) {
+			return nil, fmt.Errorf("no candidate %q in selector %s", cand, selector)
+		}
+		return eng, nil
+	}
+	var match *core.Engine
+	for _, n := range selectorNames(engines) {
+		if engines[n].HasCandidate(cand) {
+			if match != nil {
+				return nil, fmt.Errorf("candidate %q lives in several selectors; name one: force <selector> <candidate>", cand)
+			}
+			match = engines[n]
+		}
+	}
+	if match == nil {
+		return nil, fmt.Errorf("no candidate %q in any selector", cand)
+	}
+	return match, nil
+}
+
+func selectorNames(engines map[string]*core.Engine) []string {
 	names := make([]string, 0, len(engines))
 	for n := range engines {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	return names
+}
+
+func statuses(engines map[string]*core.Engine) []core.SelectorStatus {
+	names := selectorNames(engines)
 	out := make([]core.SelectorStatus, 0, len(names))
 	for _, n := range names {
 		out = append(out, engines[n].Snapshot())
@@ -70,14 +167,19 @@ func jsonEncoder(w io.Writer) *json.Encoder {
 	return enc
 }
 
-// queryStatus fetches the status dump from a running daemon.
+// queryStatus fetches the status dump from a running daemon. The
+// request line is sent for the daemon's read grace; a pre-force daemon
+// ignores it and dumps the array anyway.
 func queryStatus(path string) ([]core.SelectorStatus, error) {
 	conn, err := net.DialTimeout("unix", path, 3*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("is the daemon running? %w", err)
 	}
 	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.WriteString(conn, "status\n"); err != nil {
+		return nil, err
+	}
 	raw, err := io.ReadAll(conn)
 	if err != nil {
 		return nil, err
@@ -87,6 +189,33 @@ func queryStatus(path string) ([]core.SelectorStatus, error) {
 		return nil, err
 	}
 	return st, nil
+}
+
+// queryCtl sends one force request and reads the reply.
+func queryCtl(path, req string) (ctlReply, error) {
+	conn, err := net.DialTimeout("unix", path, 3*time.Second)
+	if err != nil {
+		return ctlReply{}, fmt.Errorf("is the daemon running? %w", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.WriteString(conn, req+"\n"); err != nil {
+		return ctlReply{}, err
+	}
+	raw, err := io.ReadAll(conn)
+	if err != nil {
+		return ctlReply{}, err
+	}
+	// a bare array is a pre-force daemon's status dump: it ignores the
+	// request line entirely
+	if len(raw) > 0 && raw[0] == '[' {
+		return ctlReply{}, errors.New("daemon is older than this command; upgrade and restart egsel")
+	}
+	var rep ctlReply
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		return ctlReply{}, fmt.Errorf("garbled daemon reply: %w", err)
+	}
+	return rep, nil
 }
 
 // renderStatus prints the human answer to "why is it on that channel?".
@@ -110,6 +239,9 @@ func renderStatus(w io.Writer, sts []core.SelectorStatus) {
 			since = " since " + st.CurrentSince.Format(time.TimeOnly)
 		}
 		fmt.Fprintf(w, "  current: %s%s%s\n", cur, since, note)
+		if !st.ForcedAt.IsZero() {
+			fmt.Fprintf(w, "  forced: at %s — challengers re-soak from here\n", st.ForcedAt.Format(time.TimeOnly))
+		}
 		fmt.Fprintf(w, "  decision: %s\n", st.LastDecision)
 		if !st.SeedDeadline.IsZero() {
 			fmt.Fprintf(w, "  seed deadline: %s\n", st.SeedDeadline.Format(time.TimeOnly))

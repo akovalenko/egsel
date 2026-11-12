@@ -36,6 +36,16 @@ type Input struct {
 	Current string
 	Opaque  bool
 
+	// ForceAt is the moment of the last admin force ("egsel force"), the
+	// boundary of a fresh trust episode for whoever holds the slot:
+	// challengers count their upgrade soak from this moment, not from
+	// their own (possibly much older) alive-since, so a forced current is
+	// not instantly reclaimed by an already-soaked senior. Everything
+	// else — failover, seed, fail modes, freshness demands — runs
+	// untouched: the force switches now; the policy speaks after. Zero
+	// when no force happened.
+	ForceAt time.Time
+
 	Roster []Candidate
 	States map[string]CandState
 
@@ -78,7 +88,9 @@ type Decision struct {
 // (failover, seed) additionally demand fresh evidence — clean targets,
 // freshly-proven-dead seniors — so that a shared outage killing every
 // candidate at once neither hops onto a dying fallback nor hands the
-// recovered slot to whichever junior's probe ticked first.
+// recovered slot to whichever junior's probe ticked first. An admin
+// force bypasses none of this: it switches the slot directly (see
+// Engine.Force) and only moves the soak baseline (ForceAt).
 func Decide(in Input) Decision {
 	if in.Opaque {
 		return Decision{Hold, "", fmt.Sprintf("slot owned by non-roster %q; holding (cannot assess it)", in.Current)}
@@ -172,7 +184,7 @@ func decideUpgrade(in Input, cur CandState) Decision {
 		if s.Status != Alive {
 			continue
 		}
-		if aliveFor := in.Now.Sub(s.AliveSince); aliveFor >= in.Window {
+		if aliveFor := in.Now.Sub(in.soakStart(s)); aliveFor >= in.Window {
 			eligible = append(eligible, c)
 		} else if pending == nil || aliveFor > pendingFor {
 			pending = &in.Roster[i]
@@ -183,13 +195,24 @@ func decideUpgrade(in Input, cur CandState) Decision {
 		t := pickBest(eligible, in.States, in.LossTol)
 		return Decision{Activate, t.Name,
 			fmt.Sprintf("upgrade: %s continuously alive %s ≥ window %s", t.Name,
-				in.Now.Sub(in.States[t.Name].AliveSince).Round(time.Second), in.Window)}
+				in.Now.Sub(in.soakStart(in.States[t.Name])).Round(time.Second), in.Window)}
 	}
 	if pending != nil {
 		return Decision{Hold, "", fmt.Sprintf("current %s alive; %s alive %s of %s window — not yet eligible to preempt",
 			in.Current, pending.Name, pendingFor.Round(time.Second), in.Window)}
 	}
 	return Decision{Hold, "", fmt.Sprintf("current %s alive; no higher-prio candidate alive", in.Current)}
+}
+
+// soakStart is when a challenger's continuous liveness began counting
+// toward preempting the current: its own alive-since, or the last admin
+// force — whichever is later. A forced current opens a fresh trust
+// episode; soak evidence older than the kick no longer evicts it.
+func (in Input) soakStart(s CandState) time.Time {
+	if in.ForceAt.After(s.AliveSince) {
+		return in.ForceAt
+	}
+	return s.AliveSince
 }
 
 func decideFailover(in Input) Decision {

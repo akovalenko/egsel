@@ -15,6 +15,7 @@ type SelectorStatus struct {
 	Current       string            `json:"current"`
 	Opaque        bool              `json:"opaque,omitempty"`
 	CurrentSince  time.Time         `json:"current_since,omitzero"`
+	ForcedAt      time.Time         `json:"forced_at,omitzero"`
 	LastDecision  string            `json:"last_decision"`
 	SeedDeadline  time.Time         `json:"seed_deadline,omitzero"`
 	GraceDeadline time.Time         `json:"grace_deadline,omitzero"`
@@ -58,6 +59,7 @@ func (e *Engine) Snapshot() SelectorStatus {
 		Current:      e.current,
 		Opaque:       e.opaque,
 		CurrentSince: e.currentSince,
+		ForcedAt:     e.forceAt,
 		LastDecision: e.lastDecision,
 		SlotError:    e.lastSlotErr,
 	}
@@ -130,6 +132,13 @@ func (e *Engine) verdict(c Candidate, tr *Tracker, s CandState, curRank Rank, cu
 	if c.Rank.Prio <= curRank.Prio {
 		return fmt.Sprintf("alive %s; never preempts a working current (prio %d ≤ %d)",
 			aliveFor, c.Rank.Prio, curRank.Prio)
+	}
+	// a recent admin force restarts the challenger soak (Input.ForceAt)
+	if e.forceAt.After(s.AliveSince) {
+		if left := e.cfg.Window - now.Sub(e.forceAt); left > 0 {
+			return fmt.Sprintf("alive %s — soak restarted by admin force at %s; preempts current in %s",
+				aliveFor, e.forceAt.Format(time.TimeOnly), left.Round(time.Second))
+		}
 	}
 	if left := e.cfg.Window - now.Sub(s.AliveSince); left > 0 {
 		return fmt.Sprintf("alive %s of %s window; preempts current in %s",
