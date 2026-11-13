@@ -93,20 +93,28 @@ func TestCtlForceRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCtlSilentClientGetsStatus(t *testing.T) {
+func TestCtlSilentClientRejected(t *testing.T) {
 	sock, _ := startCtlDaemon(t)
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	// say nothing and hang up the write side: the daemon sees EOF where
+	// the timeout path would fire — same branch, no deadline wait
+	if err := conn.(*net.UnixConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	raw, err := io.ReadAll(conn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var st []core.SelectorStatus
-	if err := json.Unmarshal(raw, &st); err != nil || len(st) != 1 {
-		t.Fatalf("a silent client must get the bare status array: %q", raw)
+	var rep ctlReply
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatalf("a silent client must get an error object, not a dump: %q", raw)
+	}
+	if rep.OK || rep.Error == "" {
+		t.Fatalf("a silent client must be rejected: %+v", rep)
 	}
 }

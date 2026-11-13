@@ -19,8 +19,7 @@ import (
 
 // serveCtl answers on a unix socket, one request per connection:
 //
-//	status                          the full status dump (also the answer
-//	                                to silence — older clients just read)
+//	status                          the full status dump
 //	force [<selector>] <candidate>  switch the slot to a candidate at
 //	                                once; automatic policy resumes on the
 //	                                next pass
@@ -64,11 +63,15 @@ type ctlReply struct {
 }
 
 func answerCtl(ctx context.Context, conn net.Conn, engines map[string]*core.Engine, log *slog.Logger) {
-	req := readRequest(conn)
+	req, err := readRequest(conn)
+	if err != nil {
+		writeJSON(conn, ctlReply{Error: err.Error()}, log)
+		return
+	}
 	parts := strings.Fields(req)
 	var rep ctlReply
 	switch {
-	case req == "" || req == "status":
+	case req == "status":
 		writeJSON(conn, statuses(engines), log) // bare array, as ever
 		return
 	case parts[0] == "force" && len(parts) == 2:
@@ -81,16 +84,16 @@ func answerCtl(ctx context.Context, conn net.Conn, engines map[string]*core.Engi
 	writeJSON(conn, rep, log)
 }
 
-// readRequest reads one command line. A client that says nothing within
-// a short grace (older status clients, bare probes) gets the status
-// dump instead; a line without its newline still counts.
-func readRequest(conn net.Conn) string {
-	conn.SetReadDeadline(time.Now().Add(time.Second))
+// readRequest reads one command line. The deadline only bounds dangling
+// connections (a client that died between connect and write); a line
+// without its trailing newline still counts.
+func readRequest(conn net.Conn) (string, error) {
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil && line == "" {
-		return ""
+		return "", errors.New("no request: one line expected, e.g. \"status\"")
 	}
-	return strings.TrimSpace(line)
+	return strings.TrimSpace(line), nil
 }
 
 func writeJSON(w io.Writer, v any, log *slog.Logger) {
