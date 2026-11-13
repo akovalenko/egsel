@@ -49,8 +49,7 @@ func serveCtl(ctx context.Context, path string, engines map[string]*core.Engine,
 			log.Warn("control accept", "err", err)
 			continue
 		}
-		answerCtl(ctx, conn, engines, log)
-		conn.Close()
+		go answerCtl(ctx, conn, engines, log)
 	}
 }
 
@@ -62,7 +61,12 @@ type ctlReply struct {
 	Statuses []core.SelectorStatus `json:"statuses,omitempty"`
 }
 
+// answerCtl serves one connection: read the request line, write one
+// reply, close. Connections are answered concurrently — a live-but-
+// mute client parks only its own handler (and a dead one EOFs at
+// once); the engine serializes cross-goroutine work on its mutex.
 func answerCtl(ctx context.Context, conn net.Conn, engines map[string]*core.Engine, log *slog.Logger) {
+	defer conn.Close()
 	req, err := readRequest(conn)
 	if err != nil {
 		writeJSON(conn, ctlReply{Error: err.Error()}, log)
@@ -84,11 +88,9 @@ func answerCtl(ctx context.Context, conn net.Conn, engines map[string]*core.Engi
 	writeJSON(conn, rep, log)
 }
 
-// readRequest reads one command line. The deadline only bounds dangling
-// connections (a client that died between connect and write); a line
-// without its trailing newline still counts.
+// readRequest reads one command line; a dead client shows up as EOF,
+// and a line without its trailing newline still counts.
 func readRequest(conn net.Conn) (string, error) {
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil && line == "" {
 		return "", errors.New("no request: one line expected, e.g. \"status\"")
