@@ -172,16 +172,18 @@ func jsonEncoder(w io.Writer) *json.Encoder {
 	return enc
 }
 
-// queryStatus fetches the status dump from a running daemon. The
-// request line is sent for the daemon's read grace; a pre-force daemon
-// ignores it and dumps the array anyway.
+// queryStatus fetches the status dump from a running daemon. Pure
+// blocking local IPC — no deadlines: a dead daemon fails the dial at
+// once, a wedged one blocks visibly until Ctrl-C or an external
+// timeout(1), which is the admin's call, not an arbitrary constant's.
+// The request line is for protocol daemons; a pre-force one ignores it
+// and dumps the array anyway.
 func queryStatus(path string) ([]core.SelectorStatus, error) {
-	conn, err := net.DialTimeout("unix", path, 3*time.Second)
+	conn, err := net.Dial("unix", path)
 	if err != nil {
 		return nil, fmt.Errorf("is the daemon running? %w", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
 	if _, err := io.WriteString(conn, "status\n"); err != nil {
 		return nil, err
 	}
@@ -196,14 +198,14 @@ func queryStatus(path string) ([]core.SelectorStatus, error) {
 	return st, nil
 }
 
-// queryCtl sends one force request and reads the reply.
+// queryCtl sends one force request and reads the reply. Blocking local
+// IPC, no deadlines — see queryStatus.
 func queryCtl(path, req string) (ctlReply, error) {
-	conn, err := net.DialTimeout("unix", path, 3*time.Second)
+	conn, err := net.Dial("unix", path)
 	if err != nil {
 		return ctlReply{}, fmt.Errorf("is the daemon running? %w", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.WriteString(conn, req+"\n"); err != nil {
 		return ctlReply{}, err
 	}
