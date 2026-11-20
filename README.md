@@ -153,11 +153,11 @@ outside, so answering that is a first-class duty:
 ```
 $ egsel status
 selector freedom (default route in table freedom), fail-open, window 30m0s
-  current: wgse2 since 12:04:17
+  current: wgse2 since 2026-11-20 12:04:17 (2m41s)
   decision: current wgse2 alive; wgse alive 18m2s of 30m0s window — not yet eligible to preempt
     wgse   prio 100/0    ALIVE  loss 0% rtt 48.2ms      alive 18m2s of 30m0s window; preempts current in 11m58s
     wgse2  prio  50/10   ALIVE  loss 0% rtt 52.1ms      current
-    wgie   prio  50/0    DEAD   loss 100%               dead since 12:04:11 (3 probes lost): timeout (1s)
+    wgie   prio  50/0    DEAD   loss 100%               dead since 2026-11-20 12:04:11 (2m47s, 3 probes lost): timeout (1s)
 ```
 
 `egsel status -json` emits the same as JSON, over a unix control socket.

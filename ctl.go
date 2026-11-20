@@ -227,6 +227,7 @@ func queryCtl(path, req string) (ctlReply, error) {
 
 // renderStatus prints the human answer to "why is it on that channel?".
 func renderStatus(w io.Writer, sts []core.SelectorStatus) {
+	now := time.Now()
 	for i, st := range sts {
 		if i > 0 {
 			fmt.Fprintln(w)
@@ -243,18 +244,19 @@ func renderStatus(w io.Writer, sts []core.SelectorStatus) {
 		}
 		since := ""
 		if !st.CurrentSince.IsZero() {
-			since = " since " + st.CurrentSince.Format(time.TimeOnly)
+			since = fmt.Sprintf(" since %s (%s)",
+				st.CurrentSince.Format(time.DateTime), now.Sub(st.CurrentSince).Round(time.Second))
 		}
 		fmt.Fprintf(w, "  current: %s%s%s\n", cur, since, note)
 		if !st.ForcedAt.IsZero() {
-			fmt.Fprintf(w, "  forced: at %s — challengers re-soak from here\n", st.ForcedAt.Format(time.TimeOnly))
+			fmt.Fprintf(w, "  forced: at %s — challengers re-soak from here\n", st.ForcedAt.Format(time.DateTime))
 		}
 		fmt.Fprintf(w, "  decision: %s\n", st.LastDecision)
 		if !st.SeedDeadline.IsZero() {
-			fmt.Fprintf(w, "  seed deadline: %s\n", st.SeedDeadline.Format(time.TimeOnly))
+			fmt.Fprintf(w, "  seed deadline: %s%s\n", st.SeedDeadline.Format(time.DateTime), inHint(now, st.SeedDeadline))
 		}
 		if !st.GraceDeadline.IsZero() {
-			fmt.Fprintf(w, "  fresh-evidence grace: until %s\n", st.GraceDeadline.Format(time.TimeOnly))
+			fmt.Fprintf(w, "  fresh-evidence grace: until %s%s\n", st.GraceDeadline.Format(time.DateTime), inHint(now, st.GraceDeadline))
 		}
 		if st.SlotError != "" {
 			fmt.Fprintf(w, "  SLOT ERROR: %s\n", st.SlotError)
@@ -276,4 +278,14 @@ func renderStatus(w io.Writer, sts []core.SelectorStatus) {
 				nameW, c.Name, c.Prio, c.Subprio, verW, strings.ToUpper(c.Status), metric, c.Verdict)
 		}
 	}
+}
+
+// inHint renders " (in 45s)" for a future deadline. Empty once the moment
+// has passed between the daemon's snapshot and this render — the daemon
+// omits expired deadlines, but the race window is one IPC round-trip.
+func inHint(now, until time.Time) string {
+	if left := until.Sub(now).Round(time.Second); left > 0 {
+		return fmt.Sprintf(" (in %s)", left)
+	}
+	return ""
 }

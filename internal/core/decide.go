@@ -127,14 +127,14 @@ func decideSeed(in Input) Decision {
 	// (cold-boot warm-up race) ...
 	if in.Now.Before(in.SeedDeadline) && in.anyHigherUnproven(best.Rank) {
 		return Decision{Hold, "", fmt.Sprintf("seed: %s reachable but deferring for higher-ranked until %s",
-			best.Name, in.SeedDeadline.Format(time.TimeOnly))}
+			best.Name, in.SeedDeadline.Format(time.DateTime))}
 	}
 	// ... or proven Dead only by storm-era evidence (the post-outage
 	// seed is otherwise a probe-phase lottery): within the grace, only a
 	// freshly lost probe writes a senior off.
 	if name, held := in.seniorLacksFreshVerdict(best); held {
 		return Decision{Hold, "", fmt.Sprintf("seed: %s reachable, but higher-prio %s has no fresh verdict — holding until %s",
-			best.Name, name, in.GraceDeadline.Format(time.TimeOnly))}
+			best.Name, name, in.GraceDeadline.Format(time.DateTime))}
 	}
 	return Decision{Activate, best.Name, fmt.Sprintf("seed: best reachable is %s", best.Name)}
 }
@@ -221,7 +221,7 @@ func decideFailover(in Input) Decision {
 		if name, held := in.seniorLacksFreshVerdict(best); held {
 			return Decision{Hold, "", fmt.Sprintf(
 				"current %s dead; %s reachable, but higher-prio %s has no fresh verdict — holding until %s",
-				in.Current, best.Name, name, in.GraceDeadline.Format(time.TimeOnly))}
+				in.Current, best.Name, name, in.GraceDeadline.Format(time.DateTime))}
 		}
 		return Decision{Activate, best.Name,
 			fmt.Sprintf("failover: current %s dead, best reachable is %s", in.Current, best.Name)}

@@ -116,7 +116,8 @@ func (e *Engine) verdict(c Candidate, tr *Tracker, s CandState, curRank Rank, cu
 	case Unknown:
 		return "no verdict yet (warming up)"
 	case Dead:
-		msg := fmt.Sprintf("dead since %s (%d probes lost)", tr.statusSince.Format(time.TimeOnly), tr.failStreak)
+		msg := fmt.Sprintf("dead since %s (%s, %d probes lost)",
+			tr.statusSince.Format(time.DateTime), now.Sub(tr.statusSince).Round(time.Second), tr.failStreak)
 		if tr.lastErr != "" {
 			msg += ": " + tr.lastErr
 		}
@@ -137,7 +138,7 @@ func (e *Engine) verdict(c Candidate, tr *Tracker, s CandState, curRank Rank, cu
 	if e.forceAt.After(s.AliveSince) {
 		if left := e.cfg.Window - now.Sub(e.forceAt); left > 0 {
 			return fmt.Sprintf("alive %s — soak restarted by admin force at %s; preempts current in %s",
-				aliveFor, e.forceAt.Format(time.TimeOnly), left.Round(time.Second))
+				aliveFor, e.forceAt.Format(time.DateTime), left.Round(time.Second))
 		}
 	}
 	if left := e.cfg.Window - now.Sub(s.AliveSince); left > 0 {
